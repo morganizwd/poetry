@@ -226,7 +226,7 @@ class MetricsCollector:
 class LSTMRhymingPoetryGenerator:
     """Генератор стихов с контролем рифмы и механизмом внимания Бахданау"""
 
-    MODEL_VERSION = 3
+    MODEL_VERSION = 4
 
     def __init__(self, model_name="poet"):
         self.model_name = model_name
@@ -290,9 +290,9 @@ class LSTMRhymingPoetryGenerator:
     def load_and_train(
         self,
         filepath="poems_clean.txt",
-        epochs=10,
+        epochs=20,
         batch_size=32,
-        max_vocab_size=8000,
+        max_vocab_size=12000,
         max_line_words=12,
         max_training_lines=20000,
     ):
@@ -513,7 +513,9 @@ class LSTMRhymingPoetryGenerator:
         self._compile_model(model)
         return model
 
-    def _sample_next_token(self, logits, temperature=0.85, allow_eos=True):
+    def _sample_next_token(
+        self, logits, temperature=0.65, allow_eos=True, extra_blocked_tokens=None
+    ):
         """Выбор следующего токена без служебных токенов в тексте строки."""
         temperature = max(float(temperature), 1e-6)
         probs = tf.nn.softmax(logits / temperature).numpy().astype(np.float64)
@@ -525,9 +527,12 @@ class LSTMRhymingPoetryGenerator:
         ]
         if not allow_eos:
             blocked_tokens.append(self.vocab["<eos>"])
+        if extra_blocked_tokens:
+            blocked_tokens.extend(extra_blocked_tokens)
 
         for token_id in blocked_tokens:
-            probs[token_id] = 0.0
+            if token_id is not None and 0 <= token_id < len(probs):
+                probs[token_id] = 0.0
 
         total = probs.sum()
         if not np.isfinite(total) or total <= 0:
@@ -537,7 +542,7 @@ class LSTMRhymingPoetryGenerator:
         return int(np.random.choice(len(probs), p=probs))
 
     def _generate_line_with_rhyme(
-        self, target_word, max_attempts=50, min_words=4, max_words=9, temperature=0.85
+        self, target_word, max_attempts=50, min_words=4, max_words=9, temperature=0.65
     ):
         """Генерация строки с рифмой (с учётом attention)"""
         if not self.model or not target_word:
@@ -564,6 +569,7 @@ class LSTMRhymingPoetryGenerator:
                     logits,
                     temperature=temperature,
                     allow_eos=len(words) >= min_words,
+                    extra_blocked_tokens=[tokens[-1]],
                 )
                 if next_token is None:
                     break
@@ -586,7 +592,7 @@ class LSTMRhymingPoetryGenerator:
         return None, None
 
     def _generate_free_line(
-        self, max_attempts=40, min_words=4, max_words=9, temperature=0.85
+        self, max_attempts=40, min_words=4, max_words=9, temperature=0.65
     ):
         """Генерация свободной строки (с учётом attention)"""
         if not self.model:
@@ -618,6 +624,7 @@ class LSTMRhymingPoetryGenerator:
                     logits,
                     temperature=temperature,
                     allow_eos=len(words) >= min_words,
+                    extra_blocked_tokens=[tokens[-1]],
                 )
                 if next_token is None:
                     break
@@ -647,7 +654,7 @@ class LSTMRhymingPoetryGenerator:
         return list(clean[:length])
 
     def generate_poem(
-        self, lines=8, rhyme_scheme="AABB", start_line=None, temperature=0.85
+        self, lines=8, rhyme_scheme="AABB", start_line=None, temperature=0.65
     ):
         """Генерация стихотворения с метриками"""
         if not self.model or not self.rhyme_search:
@@ -749,7 +756,7 @@ def main():
     print("ГЕНЕРАЦИЯ СТИХОВ С ПОМОЩЬЮ LSTM\n")
     generator = LSTMRhymingPoetryGenerator(model_name="poet")
 
-    if not generator.load_and_train("poems_clean.txt", epochs=10):
+    if not generator.load_and_train("poems_clean.txt", epochs=20):
         print("\nОшибка обучения. Проверьте наличие файла poems_clean.txt")
         return
 
