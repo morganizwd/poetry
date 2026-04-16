@@ -226,16 +226,22 @@ class MetricsCollector:
 class LSTMRhymingPoetryGenerator:
     """Генератор стихов с контролем рифмы и механизмом внимания Бахданау"""
 
-    MODEL_VERSION = 4
+    MODEL_VERSION = 5
 
     def __init__(self, model_name="poet"):
         self.model_name = model_name
         self.vowels = "аеёиоуыэюя"
         self.model = None
         self.rhyme_search = None
-        self.vocab = {"<pad>": 0, "<unk>": 1, "<bos>": 2, "<eos>": 3}
-        self.id2word = {0: "<pad>", 1: "<unk>", 2: "<bos>", 3: "<eos>"}
-        self.VOCAB_SIZE = 4
+        self.vocab = {
+            "<pad>": 0,
+            "<unk>": 1,
+            "<bos>": 2,
+            "<eos>": 3,
+            "<line>": 4,
+        }
+        self.id2word = {v: k for k, v in self.vocab.items()}
+        self.VOCAB_SIZE = len(self.vocab)
         self.original_lines = set()
         self.poems = []
         self.metrics = MetricsCollector()
@@ -243,10 +249,6 @@ class LSTMRhymingPoetryGenerator:
     def _tokenize_russian(self, text):
         """Токенизация"""
         return re.findall(r"[а-яё]+", text.lower())
-
-    def _reverse_words(self, line):
-        """Реверсирование строки"""
-        return " ".join(reversed(self._tokenize_russian(line)))
 
     def _extract_last_word(self, line):
         """Извлекает последнее слово из строки"""
@@ -274,12 +276,53 @@ class LSTMRhymingPoetryGenerator:
                 return False
         return True
 
+    def _is_good_generated_line(self, words, min_words):
+        """Простой фильтр строк, которые выглядят явно неудачно."""
+        if len(words) < min_words:
+            return False
+
+        bad_end_words = {
+            "и", "а", "но", "или", "что", "как", "не", "ни", "же", "ли", "бы",
+            "в", "во", "на", "к", "ко", "с", "со", "у", "о", "об", "от", "до",
+            "по", "за", "из", "над", "под", "для", "без", "при", "меж",
+        }
+        stop_words = bad_end_words | {
+            "я", "ты", "он", "она", "мы", "вы", "они", "это", "этот", "тот",
+            "все", "всё", "мне", "тебе", "его", "ее", "её", "их", "мой",
+            "твой", "свой", "был", "была", "были", "будет", "есть",
+        }
+
+        if words[-1] in bad_end_words:
+            return False
+
+        for prev_word, word in zip(words, words[1:]):
+            if prev_word == word:
+                return False
+
+        if max(words.count(word) for word in set(words)) > 2:
+            return False
+
+        content_words = [word for word in words if word not in stop_words]
+        if len(content_words) < 2:
+            return False
+
+        stop_ratio = 1 - len(content_words) / len(words)
+        if stop_ratio > 0.6:
+            return False
+
+        if not any(len(word) >= 5 for word in words):
+            return False
+
+        return True
+
     def _postprocess_line(self, words, min_words):
         """Постобработка сгенерированной строки"""
         if len(words) < min_words:
             return None
-        normal_line = " ".join(reversed(words))
+        normal_line = " ".join(words)
         if len(normal_line) < 10 or self._count_vowels(normal_line) < 2:
+            return None
+        if not self._is_good_generated_line(words, min_words):
             return None
         if not self._is_unique_line(normal_line, threshold=0.85):
             return None
@@ -295,6 +338,7 @@ class LSTMRhymingPoetryGenerator:
         max_vocab_size=12000,
         max_line_words=12,
         max_training_lines=20000,
+        max_sequence_len=80,
     ):
         """обучение моделей"""
 
@@ -365,29 +409,41 @@ class LSTMRhymingPoetryGenerator:
             if line.strip() and len(line.strip()) > 10
         }
 
-        all_lines, word_counts = [], Counter()
+        poem_token_lines, word_counts = [], Counter()
         poems = [p.strip() for p in content.split("\n\n") if p.strip()]
         self.poems = poems
 
         for poem in poems:
+            current_poem = []
             lines = [l.strip() for l in poem.split("\n") if l.strip()]
             for line in lines:
                 tokens = self._tokenize_russian(line)
                 vowel_count = self._count_vowels(line)
                 if 3 <= len(tokens) <= max_line_words and vowel_count >= 2:
-                    all_lines.append(line)
+                    current_poem.append(tokens)
                     word_counts.update(w for w in tokens if len(w) >= 2)
+            if len(current_poem) >= 2:
+                poem_token_lines.append(current_poem)
 
-        if not all_lines:
+        total_lines = sum(len(poem) for poem in poem_token_lines)
+        if not poem_token_lines:
             print("Не найдено подходящих строк для обучения.")
             return False
 
-        if len(all_lines) > max_training_lines:
-            random.shuffle(all_lines)
-            all_lines = all_lines[:max_training_lines]
+        if total_lines > max_training_lines:
+            random.shuffle(poem_token_lines)
+            selected_poems, selected_lines = [], 0
+            for poem in poem_token_lines:
+                if selected_lines >= max_training_lines:
+                    break
+                selected_poems.append(poem)
+                selected_lines += len(poem)
+            poem_token_lines = selected_poems
+            total_lines = selected_lines
 
         print(f"Статистика датасета:")
-        print(f"   Строк для обучения: {len(all_lines)}")
+        print(f"   Стихотворений для обучения: {len(poem_token_lines)}")
+        print(f"   Строк для обучения: {total_lines}")
         print(f"   Уникальных слов до ограничения словаря: {len(word_counts)}")
 
         available_vocab_slots = max_vocab_size - len(self.vocab)
@@ -401,25 +457,33 @@ class LSTMRhymingPoetryGenerator:
         self.rhyme_search = RhymeSearch()
         model_words = [
             w for w in self.vocab
-            if w not in ["<pad>", "<unk>", "<bos>", "<eos>"]
+            if w not in ["<pad>", "<unk>", "<bos>", "<eos>", "<line>"]
         ]
         self.rhyme_search.train(model_words)
         self.rhyme_search.save_json(f"{self.model_name}_rhymes.json")
 
-        reversed_encoded = []
-        for line in all_lines:
-            tokens = self._tokenize_russian(line)
-            ids = (
-                [self.vocab["<bos>"]]
-                + [self.vocab.get(w, self.vocab["<unk>"]) for w in reversed(tokens)]
-                + [self.vocab["<eos>"]]
-            )
-            reversed_encoded.append(ids)
+        encoded_sequences = []
+        for poem in poem_token_lines:
+            ids = [self.vocab["<bos>"]]
+            for line_index, tokens in enumerate(poem):
+                ids.extend(self.vocab.get(w, self.vocab["<unk>"]) for w in tokens)
+                if line_index < len(poem) - 1:
+                    ids.append(self.vocab["<line>"])
+            ids.append(self.vocab["<eos>"])
 
-        random.shuffle(reversed_encoded)
+            for start in range(0, len(ids) - 1, max_sequence_len):
+                chunk = ids[start : start + max_sequence_len + 1]
+                if len(chunk) >= 4:
+                    encoded_sequences.append(chunk)
+
+        if not encoded_sequences:
+            print("Не удалось подготовить последовательности для LSTM.")
+            return False
+
+        random.shuffle(encoded_sequences)
         batches = []
-        for i in range(0, len(reversed_encoded), batch_size):
-            batch = reversed_encoded[i : i + batch_size]
+        for i in range(0, len(encoded_sequences), batch_size):
+            batch = encoded_sequences[i : i + batch_size]
             maxlen = max(len(x) for x in batch)
             x, y = [], []
             for seq in batch:
@@ -514,7 +578,12 @@ class LSTMRhymingPoetryGenerator:
         return model
 
     def _sample_next_token(
-        self, logits, temperature=0.65, allow_eos=True, extra_blocked_tokens=None
+        self,
+        logits,
+        temperature=0.65,
+        allow_eos=True,
+        top_k=40,
+        extra_blocked_tokens=None,
     ):
         """Выбор следующего токена без служебных токенов в тексте строки."""
         temperature = max(float(temperature), 1e-6)
@@ -527,12 +596,21 @@ class LSTMRhymingPoetryGenerator:
         ]
         if not allow_eos:
             blocked_tokens.append(self.vocab["<eos>"])
+            blocked_tokens.append(self.vocab["<line>"])
         if extra_blocked_tokens:
             blocked_tokens.extend(extra_blocked_tokens)
 
         for token_id in blocked_tokens:
             if token_id is not None and 0 <= token_id < len(probs):
                 probs[token_id] = 0.0
+
+        positive_ids = np.flatnonzero(probs > 0)
+        if top_k and len(positive_ids) > top_k:
+            positive_probs = probs[positive_ids]
+            keep_ids = positive_ids[np.argpartition(positive_probs, -top_k)[-top_k:]]
+            filtered = np.zeros_like(probs)
+            filtered[keep_ids] = probs[keep_ids]
+            probs = filtered
 
         total = probs.sum()
         if not np.isfinite(total) or total <= 0:
@@ -541,110 +619,174 @@ class LSTMRhymingPoetryGenerator:
         probs /= total
         return int(np.random.choice(len(probs), p=probs))
 
-    def _generate_line_with_rhyme(
-        self, target_word, max_attempts=50, min_words=4, max_words=9, temperature=0.65
+    def _words_to_ids(self, words):
+        """Перевод слов в id с учётом неизвестных слов."""
+        return [self.vocab.get(word, self.vocab["<unk>"]) for word in words]
+
+    def _trim_context(self, token_ids, max_context_tokens=80):
+        """Ограничение контекста, чтобы attention не становился слишком тяжёлым."""
+        return token_ids[-max_context_tokens:]
+
+    def _generate_candidate_words(
+        self,
+        context_ids,
+        min_words=4,
+        max_words=9,
+        temperature=0.65,
+        top_k=40,
+        max_context_tokens=80,
     ):
-        """Генерация строки с рифмой (с учётом attention)"""
+        """Генерация одной строки слева направо."""
+        tokens = list(context_ids)
+        words = []
+
+        for _ in range(max_words * 2):
+            input_ids = self._trim_context(tokens, max_context_tokens)
+            input_seq = np.array([input_ids], dtype=np.int32)
+            logits = self.model.predict(input_seq, verbose=0)[0, -1, :]
+            next_token = self._sample_next_token(
+                logits,
+                temperature=temperature,
+                allow_eos=len(words) >= min_words,
+                top_k=top_k,
+                extra_blocked_tokens=[tokens[-1] if tokens else None],
+            )
+            if next_token is None:
+                break
+
+            next_word = self.id2word.get(next_token, "<unk>")
+            if next_word in ["<line>", "<eos>"]:
+                break
+
+            tokens.append(next_token)
+            words.append(next_word)
+
+            if len(words) >= max_words:
+                break
+
+        return words
+
+    def _line_score(self, words, min_words):
+        """Простая оценка качества строки без сложной лингвистики."""
+        if not self._is_good_generated_line(words, min_words):
+            return None
+
+        line = " ".join(words)
+        if not self._is_unique_line(line, threshold=0.85):
+            return None
+
+        unique_ratio = len(set(words)) / len(words)
+        length_bonus = 1.0 - min(abs(len(words) - 7) * 0.08, 0.5)
+        return unique_ratio + length_bonus
+
+    def _generate_best_line(
+        self,
+        context_ids,
+        target_word=None,
+        candidates=40,
+        min_words=4,
+        max_words=9,
+        temperature=0.65,
+        top_k=40,
+    ):
+        """Генерация нескольких вариантов и выбор лучшего."""
+        best_line, best_last_word, best_quality, best_score = None, None, 0, -1
+
+        for _ in range(candidates):
+            words = self._generate_candidate_words(
+                context_ids,
+                min_words=min_words,
+                max_words=max_words,
+                temperature=temperature,
+                top_k=top_k,
+            )
+            score = self._line_score(words, min_words)
+            if score is None:
+                continue
+
+            line = self._postprocess_line(words, min_words)
+            if not line:
+                continue
+
+            last_word = self._extract_last_word(line)
+            rhyme_quality = 0
+            if target_word:
+                rhyme_quality = self.metrics.calculate_rhyme_quality(
+                    target_word, line
+                )
+                if rhyme_quality < 0.5:
+                    continue
+                score += rhyme_quality * 3
+
+            if score > best_score:
+                best_line = line
+                best_last_word = last_word
+                best_quality = rhyme_quality
+                best_score = score
+
+        if best_line:
+            return best_line, best_last_word, best_quality
+        return None, None, 0
+
+    def _generate_line_with_rhyme(
+        self,
+        target_word,
+        context_ids,
+        max_attempts=50,
+        min_words=4,
+        max_words=9,
+        temperature=0.65,
+        top_k=40,
+    ):
+        """Генерация строки слева направо с последующим выбором рифмы."""
         if not self.model or not target_word:
             return None, None
 
-        exclude_words = {target_word}
-        for _ in range(max_attempts):
-            rhyme_word = self.rhyme_search.give_rhyme(target_word, exclude_words)
-            if not rhyme_word or rhyme_word not in self.vocab:
-                continue
+        line, last_word, quality = self._generate_best_line(
+            context_ids,
+            target_word=target_word,
+            candidates=max_attempts,
+            min_words=min_words,
+            max_words=max_words,
+            temperature=temperature,
+            top_k=top_k,
+        )
+        if line and quality >= 0.5:
+            return line, last_word
 
-            exclude_words.add(rhyme_word)
-            tokens = [self.vocab["<bos>"], self.vocab[rhyme_word]]
-            words = [rhyme_word]
-
-            for _ in range(max_words * 2):
-                if len(words) >= max_words:
-                    break
-
-                input_seq = np.array([tokens], dtype=np.int32)
-
-                logits = self.model.predict(input_seq, verbose=0)[0, -1, :]
-                next_token = self._sample_next_token(
-                    logits,
-                    temperature=temperature,
-                    allow_eos=len(words) >= min_words,
-                    extra_blocked_tokens=[tokens[-1]],
-                )
-                if next_token is None:
-                    break
-
-                next_word = self.id2word.get(next_token, "<unk>")
-
-                if next_word == "<eos>":
-                    break
-
-                tokens.append(next_token)
-                words.append(next_word)
-
-            if len(words) < min_words:
-                continue
-
-            line = self._postprocess_line(words, min_words)
-            if line:
-                return line, rhyme_word
-
-        return None, None
+        fallback_line = self._generate_free_line(
+            context_ids,
+            max_attempts=20,
+            min_words=min_words,
+            max_words=max_words,
+            temperature=temperature,
+            top_k=top_k,
+        )
+        return fallback_line, None
 
     def _generate_free_line(
-        self, max_attempts=40, min_words=4, max_words=9, temperature=0.65
+        self,
+        context_ids,
+        max_attempts=25,
+        min_words=4,
+        max_words=9,
+        temperature=0.65,
+        top_k=40,
     ):
-        """Генерация свободной строки (с учётом attention)"""
+        """Генерация свободной строки слева направо."""
         if not self.model:
             return None
 
-        for _ in range(max_attempts):
-            valid_words = [
-                w for w in self.vocab
-                if w not in ["<pad>", "<unk>", "<bos>", "<eos>"]
-            ]
-            if not valid_words:
-                return None
-
-            start_word = random.choice(valid_words)
-            if start_word not in self.vocab:
-                continue
-
-            tokens = [self.vocab["<bos>"], self.vocab[start_word]]
-            words = [start_word]
-
-            for _ in range(max_words * 2):
-                if len(words) >= max_words:
-                    break
-
-                input_seq = np.array([tokens], dtype=np.int32)
-
-                logits = self.model.predict(input_seq, verbose=0)[0, -1, :]
-                next_token = self._sample_next_token(
-                    logits,
-                    temperature=temperature,
-                    allow_eos=len(words) >= min_words,
-                    extra_blocked_tokens=[tokens[-1]],
-                )
-                if next_token is None:
-                    break
-
-                next_word = self.id2word.get(next_token, "<unk>")
-
-                if next_word == "<eos>":
-                    break
-
-                tokens.append(next_token)
-                words.append(next_word)
-
-            if len(words) < min_words:
-                continue
-
-            line = self._postprocess_line(words, min_words)
-            if line:
-                return line
-
-        return None
+        line, _, _ = self._generate_best_line(
+            context_ids,
+            target_word=None,
+            candidates=max_attempts,
+            min_words=min_words,
+            max_words=max_words,
+            temperature=temperature,
+            top_k=top_k,
+        )
+        return line
 
     def _simplify_scheme(self, scheme, length):
         """Приведение схемы рифмовки к нужной длине"""
@@ -664,22 +806,29 @@ class LSTMRhymingPoetryGenerator:
         rhyme_success_count, rhyme_pairs_count, rhyme_quality_sum = 0, 0, 0
         scheme = self._simplify_scheme(rhyme_scheme, lines)
         poem, line_scheme, rhyme_map = [], [], {}
+        context_ids = [self.vocab["<bos>"]]
         start_idx = 0
 
         if start_line and len(start_line.strip()) >= 10:
-            clean_start = " ".join(self._tokenize_russian(start_line.strip()))
+            start_words = self._tokenize_russian(start_line.strip())
+            clean_start = " ".join(start_words)
             if clean_start and (last_word := self._extract_last_word(clean_start)):
                 clean_start = clean_start[0].upper() + clean_start[1:]
                 poem.append(clean_start)
                 line_scheme.append(scheme[0])
                 rhyme_map[scheme[0]] = last_word
+                context_ids.extend(self._words_to_ids(start_words))
+                context_ids.append(self.vocab["<line>"])
                 start_idx = 1
 
         for i in range(start_idx, lines):
             rhyme_letter = scheme[i]
             if rhyme_letter not in rhyme_map:
                 line = self._generate_free_line(
-                    min_words=4, max_words=9, temperature=temperature
+                    context_ids,
+                    min_words=5,
+                    max_words=10,
+                    temperature=temperature,
                 )
                 if not line:
                     continue
@@ -687,12 +836,15 @@ class LSTMRhymingPoetryGenerator:
                 line_scheme.append(rhyme_letter)
                 if last_word := self._extract_last_word(line):
                     rhyme_map[rhyme_letter] = last_word
+                context_ids.extend(self._words_to_ids(self._tokenize_russian(line)))
+                context_ids.append(self.vocab["<line>"])
             else:
                 target_word = rhyme_map[rhyme_letter]
                 line, rhyme_word = self._generate_line_with_rhyme(
                     target_word,
-                    min_words=4,
-                    max_words=9,
+                    context_ids,
+                    min_words=5,
+                    max_words=10,
                     temperature=temperature,
                 )
                 if not line:
@@ -705,6 +857,8 @@ class LSTMRhymingPoetryGenerator:
 
                 poem.append(line)
                 line_scheme.append(rhyme_letter)
+                context_ids.extend(self._words_to_ids(self._tokenize_russian(line)))
+                context_ids.append(self.vocab["<line>"])
                 rhyme_pairs_count += 1
                 if rhyme_word:
                     rhyme_success_count += 1
