@@ -14,7 +14,7 @@ from tensorflow.keras.layers import (
 )
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
-from collections import defaultdict
+from collections import defaultdict, Counter
 import statistics
 
 # МЕХАНИЗМ ВНИМАНИЯ БАХДАНАУ (Additive Attention)
@@ -226,7 +226,7 @@ class MetricsCollector:
 class LSTMRhymingPoetryGenerator:
     """Генератор стихов с контролем рифмы и механизмом внимания Бахданау"""
 
-    MODEL_VERSION = 2
+    MODEL_VERSION = 3
 
     def __init__(self, model_name="poet"):
         self.model_name = model_name
@@ -287,7 +287,15 @@ class LSTMRhymingPoetryGenerator:
             normal_line = normal_line[0].upper() + normal_line[1:]
         return normal_line
 
-    def load_and_train(self, filepath="poems_clean.txt", epochs=30):
+    def load_and_train(
+        self,
+        filepath="poems_clean.txt",
+        epochs=10,
+        batch_size=32,
+        max_vocab_size=8000,
+        max_line_words=12,
+        max_training_lines=20000,
+    ):
         """обучение моделей"""
 
         model_path = f"{self.model_name}_model.keras"
@@ -357,7 +365,7 @@ class LSTMRhymingPoetryGenerator:
             if line.strip() and len(line.strip()) > 10
         }
 
-        all_lines, all_words = [], set()
+        all_lines, word_counts = [], Counter()
         poems = [p.strip() for p in content.split("\n\n") if p.strip()]
         self.poems = poems
 
@@ -366,22 +374,36 @@ class LSTMRhymingPoetryGenerator:
             for line in lines:
                 tokens = self._tokenize_russian(line)
                 vowel_count = self._count_vowels(line)
-                if 3 <= len(tokens) <= 15 and vowel_count >= 2:
+                if 3 <= len(tokens) <= max_line_words and vowel_count >= 2:
                     all_lines.append(line)
-                    all_words.update(w for w in tokens if len(w) >= 2)
+                    word_counts.update(w for w in tokens if len(w) >= 2)
 
         if not all_lines:
             print("Не найдено подходящих строк для обучения.")
             return False
 
-        for word in all_words:
+        if len(all_lines) > max_training_lines:
+            random.shuffle(all_lines)
+            all_lines = all_lines[:max_training_lines]
+
+        print(f"Статистика датасета:")
+        print(f"   Строк для обучения: {len(all_lines)}")
+        print(f"   Уникальных слов до ограничения словаря: {len(word_counts)}")
+
+        available_vocab_slots = max_vocab_size - len(self.vocab)
+        for word, _ in word_counts.most_common(available_vocab_slots):
             if word not in self.vocab:
                 self.vocab[word] = len(self.vocab)
         self.id2word = {v: k for k, v in self.vocab.items()}
         self.VOCAB_SIZE = len(self.vocab)
+        print(f"   Размер словаря модели: {self.VOCAB_SIZE}")
 
         self.rhyme_search = RhymeSearch()
-        self.rhyme_search.train(list(all_words))
+        model_words = [
+            w for w in self.vocab
+            if w not in ["<pad>", "<unk>", "<bos>", "<eos>"]
+        ]
+        self.rhyme_search.train(model_words)
         self.rhyme_search.save_json(f"{self.model_name}_rhymes.json")
 
         reversed_encoded = []
@@ -396,8 +418,8 @@ class LSTMRhymingPoetryGenerator:
 
         random.shuffle(reversed_encoded)
         batches = []
-        for i in range(0, len(reversed_encoded), 128):
-            batch = reversed_encoded[i : i + 128]
+        for i in range(0, len(reversed_encoded), batch_size):
+            batch = reversed_encoded[i : i + batch_size]
             maxlen = max(len(x) for x in batch)
             x, y = [], []
             for seq in batch:
@@ -408,7 +430,7 @@ class LSTMRhymingPoetryGenerator:
                 (np.array(x, dtype=np.int32), np.array(y, dtype=np.int32))
             )
 
-        print(f"\nОбучение модели ({epochs} эпох)...")
+        print(f"\nОбучение модели ({epochs} эпох, batch_size={batch_size})...")
         self.model = self._build_model()
 
         for epoch in range(epochs):
@@ -422,9 +444,8 @@ class LSTMRhymingPoetryGenerator:
                 loss_value = result[0] if isinstance(result, (list, tuple)) else result
                 total_loss += float(loss_value)
                 total_batches += 1
-            if (epoch + 1) % 5 == 0:
-                avg_loss = total_loss / total_batches if total_batches > 0 else 0
-                print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
+            avg_loss = total_loss / total_batches if total_batches > 0 else 0
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
 
         self.model.save(f"{self.model_name}_model.keras")
         metadata = {
@@ -446,8 +467,8 @@ class LSTMRhymingPoetryGenerator:
         )
 
     def _build_model(
-        self, embedding_dim=256, hidden_size=512, num_layers=3,
-        dropout=0.3, attention_units=256
+        self, embedding_dim=128, hidden_size=128, num_layers=1,
+        dropout=0.2, attention_units=64
     ):
         """
         Создание архитектуры модели с механизмом внимания Бахданау
@@ -724,7 +745,7 @@ def main():
     print("ГЕНЕРАЦИЯ СТИХОВ С ПОМОЩЬЮ LSTM\n")
     generator = LSTMRhymingPoetryGenerator(model_name="poet")
 
-    if not generator.load_and_train("poems_clean.txt", epochs=30):
+    if not generator.load_and_train("poems_clean.txt", epochs=10):
         print("\nОшибка обучения. Проверьте наличие файла poems_clean.txt")
         return
 
