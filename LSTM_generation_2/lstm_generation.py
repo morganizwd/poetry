@@ -431,12 +431,16 @@ class LSTMRhymingPoetryGenerator:
             )
 
         print(f"\nОбучение модели ({epochs} эпох, batch_size={batch_size})...")
+        print(f"   Батчей в одной эпохе: {len(batches)}")
         self.model = self._build_model()
 
         for epoch in range(epochs):
             total_loss = 0
             total_batches = 0
-            for x_batch, y_batch in batches:
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            for batch_index, (x_batch, y_batch) in enumerate(batches, start=1):
+                if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(batches):
+                    print(f"   batch {batch_index}/{len(batches)}...", flush=True)
                 sample_weight = (y_batch != self.vocab["<pad>"]).astype("float32")
                 result = self.model.train_on_batch(
                     x_batch, y_batch, sample_weight=sample_weight
