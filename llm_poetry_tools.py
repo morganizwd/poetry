@@ -817,6 +817,13 @@ class LLMPoetryAssistant:
             else "- Работай именно как редактор: улучшай черновик, а не заменяй его полностью без необходимости."
         )
 
+        rhyme_scheme_explanation = {
+            "AABB": "попарная (1-2 рифмуются, 3-4 рифмуются и т.д.)",
+            "ABAB": "перекрёстная (1-3 рифмуются, 2-4 рифмуются)",
+            "ABBA": "опоясывающая (1-4 рифмуются, 2-3 рифмуются)",
+            "AAAA": "сплошная (все строки рифмуются)",
+        }.get(rhyme_scheme, rhyme_scheme)
+
         prompt = f"""
 Ты литературный редактор русскоязычных стихотворений.
 
@@ -824,14 +831,14 @@ class LLMPoetryAssistant:
 Твоя задача - отредактировать черновик, а не написать стихотворение с нуля.
 
 Требования:
-- Сохрани количество строк: {expected_lines}.
-- Сохрани схему рифмовки: {rhyme_scheme}.
+- Сохрани количество строк: ровно {expected_lines}.
+- ОБЯЗАТЕЛЬНО сохрани схему рифмовки {rhyme_scheme} ({rhyme_scheme_explanation}). Это приоритет номер один. Строки, которые должны рифмоваться, должны оканчиваться на схожие звуки.
 {first_line_rule}
 {draft_role_rule}
 - Сохрани тему и основные образы черновика, если они не ломают смысл.
 - Исправь грамматику и сделай текст более осмысленным.
 - Не добавляй заголовок, пояснения, нумерацию или комментарии.
-- Верни только итоговое стихотворение.
+- Верни только итоговое стихотворение, строка за строкой.
 
 Черновик:
 {draft_text}
@@ -961,14 +968,14 @@ class LLMPoetryAssistant:
 Стихотворение:
 {poem_text}
 
-Формат ответа:
+Формат ответа (подставь целые числа от 1 до 5 вместо угловых скобок):
 {{
-  "semantic_coherence": 1,
-  "grammar": 1,
-  "theme_consistency": 1,
-  "poetic_quality": 1,
-  "overall": 1,
-  "comment": "краткий комментарий"
+  "semantic_coherence": <число от 1 до 5>,
+  "grammar": <число от 1 до 5>,
+  "theme_consistency": <число от 1 до 5>,
+  "poetic_quality": <число от 1 до 5>,
+  "overall": <число от 1 до 5>,
+  "comment": "краткий комментарий на русском"
 }}
 """.strip()
 
@@ -1003,6 +1010,9 @@ class LLMPoetryAssistant:
         text = re.sub(r"^```(?:json)?", "", text).strip()
         text = re.sub(r"```$", "", text).strip()
 
+        # Replace placeholder values like <число от 1 до 5> with 0 so JSON parses.
+        text = re.sub(r'"([^"]+)":\s*<[^>]+>', r'"\1": 0', text)
+
         match = re.search(r"\{.*\}", text, flags=re.S)
         if match:
             text = match.group(0)
@@ -1010,7 +1020,18 @@ class LLMPoetryAssistant:
         try:
             data = json.loads(text)
         except Exception:
-            return self._empty_evaluation("Не удалось разобрать JSON-оценку.")
+            # Fallback: extract field:number pairs directly from raw text.
+            data = {}
+            for field in SCORE_FIELDS:
+                m = re.search(
+                    rf'"{re.escape(field)}"\s*:\s*(\d+)', raw_response
+                )
+                if m:
+                    data[field] = int(m.group(1))
+            comment_m = re.search(r'"comment"\s*:\s*"([^"]*)"', raw_response)
+            data["comment"] = comment_m.group(1) if comment_m else ""
+            if not any(field in data for field in SCORE_FIELDS):
+                return self._empty_evaluation("Не удалось разобрать JSON-оценку.")
 
         normalized: Dict[str, Any] = {}
         for field in SCORE_FIELDS:
