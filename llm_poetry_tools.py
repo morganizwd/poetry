@@ -501,10 +501,15 @@ class LLMPoetryAssistant:
         if self.provider in {"hf", "huggingface"}:
             self.provider = "transformers"
 
+        if self.provider in {"disabled", "none", "off"}:
+            self.provider = "disabled"
+            self.last_error = "LLM отключен текущими настройками."
+            return
+
         if self.provider not in {"gemini", "ollama", "transformers"}:
             self.last_error = (
                 f"Unsupported LLM provider: {self.provider}. "
-                "Use 'gemini', 'ollama', or 'transformers'."
+                "Use 'gemini', 'ollama', 'transformers', or 'disabled'."
             )
             return
 
@@ -564,8 +569,9 @@ class LLMPoetryAssistant:
 
         if not torch.cuda.is_available():
             self.last_error = (
-                "Enable a GPU runtime in Colab "
-                "(Runtime -> Change runtime type -> T4 GPU) and rerun this cell."
+                "Для локального transformers-LLM нужна CUDA GPU. "
+                "В Colab включите T4 GPU, а локально либо используйте CUDA-окружение, "
+                "либо переключите LLM_PROVIDER на 'disabled' или 'ollama'."
             )
             return
 
@@ -600,6 +606,8 @@ class LLMPoetryAssistant:
     def is_available(self) -> bool:
         """Return True if the selected LLM backend is ready."""
 
+        if self.provider == "disabled":
+            return False
         if self.provider == "ollama":
             return bool(self.base_url and self.client)
         return self.client is not None
