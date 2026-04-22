@@ -784,6 +784,7 @@ class LLMPoetryAssistant:
         start_line: str,
         rhyme_scheme: str = "AABB",
         preserve_first_line: bool = True,
+        target_lines: Optional[int] = None,
     ) -> List[str]:
         """Edit a generated draft while preserving the generator's role."""
 
@@ -791,12 +792,21 @@ class LLMPoetryAssistant:
         if not draft_lines:
             return []
 
-        expected_lines = len(draft_lines)
+        requested_lines = max(0, int(target_lines or 0))
+        expected_lines = max(len(draft_lines), requested_lines)
+        expansion_mode = expected_lines > len(draft_lines)
         draft_text = "\n".join(draft_lines)
         first_line_rule = (
             f'- Первую строку сохрани без изменений: "{start_line}".'
             if preserve_first_line and start_line
             else "- Первую строку можно слегка отредактировать, если это необходимо."
+        )
+        draft_role_rule = (
+            "- Черновик неполный или слабый. Преврати его в цельное стихотворение: "
+            "при необходимости заметно перепиши слабые строки и допиши недостающие, "
+            "но сохрани первую строку, тему и полезные образы черновика."
+            if expansion_mode
+            else "- Работай именно как редактор: улучшай черновик, а не заменяй его полностью без необходимости."
         )
 
         prompt = f"""
@@ -809,6 +819,7 @@ class LLMPoetryAssistant:
 - Сохрани количество строк: {expected_lines}.
 - Сохрани схему рифмовки: {rhyme_scheme}.
 {first_line_rule}
+{draft_role_rule}
 - Сохрани тему и основные образы черновика, если они не ломают смысл.
 - Исправь грамматику и сделай текст более осмысленным.
 - Не добавляй заголовок, пояснения, нумерацию или комментарии.
@@ -830,13 +841,77 @@ class LLMPoetryAssistant:
 
         if len(edited_lines) > expected_lines:
             edited_lines = edited_lines[:expected_lines]
-        elif len(edited_lines) < expected_lines:
+        elif len(edited_lines) < expected_lines and expansion_mode:
+            edited_lines.extend(
+                self._complete_poem_lines(
+                    current_lines=edited_lines,
+                    draft_lines=draft_lines,
+                    start_line=start_line,
+                    rhyme_scheme=rhyme_scheme,
+                    expected_lines=expected_lines,
+                    preserve_first_line=preserve_first_line,
+                )
+            )
+
+        if len(edited_lines) < expected_lines:
             edited_lines.extend(draft_lines[len(edited_lines) : expected_lines])
 
         if preserve_first_line and edited_lines and start_line:
             edited_lines[0] = start_line.strip()
 
+        if len(edited_lines) > expected_lines:
+            edited_lines = edited_lines[:expected_lines]
+
         return edited_lines
+
+    def _complete_poem_lines(
+        self,
+        current_lines: Sequence[str],
+        draft_lines: Sequence[str],
+        start_line: str,
+        rhyme_scheme: str,
+        expected_lines: int,
+        preserve_first_line: bool = True,
+    ) -> List[str]:
+        if len(current_lines) >= expected_lines:
+            return []
+
+        missing_lines = expected_lines - len(current_lines)
+        current_text = "\n".join(current_lines)
+        draft_text = "\n".join(draft_lines)
+        first_line_rule = (
+            f'- Первую строку сохрани без изменений: "{start_line}".'
+            if preserve_first_line and start_line
+            else "- Первую строку можно слегка отредактировать."
+        )
+
+        prompt = f"""
+Ты завершаешь русскоязычное стихотворение.
+
+Уже есть начало стихотворения, но оно неполное.
+Добавь ровно {missing_lines} новых строки, чтобы в сумме получилось {expected_lines} строк.
+
+Требования:
+- Сохрани схему рифмовки: {rhyme_scheme}.
+{first_line_rule}
+- Сохрани тему и основные образы.
+- Не повторяй уже имеющиеся строки.
+- Верни только новые добавленные строки без нумерации и пояснений.
+
+Уже готово:
+{current_text}
+
+Исходный черновик:
+{draft_text}
+""".strip()
+
+        continuation_text = self._generate(
+            prompt,
+            temperature=self.config.editor_temperature,
+            response_mime_type="text/plain",
+        )
+        continuation_lines = normalize_poem(continuation_text)
+        return continuation_lines[:missing_lines]
 
     def evaluate_poem(
         self,
@@ -856,6 +931,10 @@ class LLMPoetryAssistant:
 
 Оцени стихотворение по шкале от 1 до 5:
 1 - очень плохо, 2 - плохо, 3 - средне, 4 - хорошо, 5 - отлично.
+
+Используй всю шкалу 1-5, а не только крайние значения.
+Ставь 1 только если текст почти полностью распадается по соответствующему критерию.
+Не ставь всем критериям одинаковую оценку без необходимости: оцени их независимо.
 
 Критерии:
 - semantic_coherence: смысловая связность текста;
