@@ -673,8 +673,8 @@ class LSTMRhymingPoetryGenerator:
         min_words=4,
         max_words=9,
         temperature=0.65,
-        top_k=40,
-        max_context_tokens=80,
+        top_k=30,
+        max_context_tokens=60,
     ):
         """Генерация одной строки слева направо."""
         tokens = list(context_ids)
@@ -682,8 +682,8 @@ class LSTMRhymingPoetryGenerator:
 
         for _ in range(max_words * 2):
             input_ids = self._trim_context(tokens, max_context_tokens)
-            input_seq = np.array([input_ids], dtype=np.int32)
-            logits = self.model.predict(input_seq, verbose=0)[0, -1, :]
+            input_seq = tf.convert_to_tensor([input_ids], dtype=tf.int32)
+            logits = self.model(input_seq, training=False)[0, -1, :].numpy()
             next_token = self._sample_next_token(
                 logits,
                 temperature=temperature,
@@ -723,11 +723,12 @@ class LSTMRhymingPoetryGenerator:
         self,
         context_ids,
         target_word=None,
-        candidates=40,
+        candidates=16,
         min_words=4,
         max_words=9,
         temperature=0.65,
-        top_k=40,
+        top_k=30,
+        max_context_tokens=60,
     ):
         """Генерация нескольких вариантов и выбор лучшего."""
         best_line, best_last_word, best_quality, best_score = None, None, 0, -1
@@ -739,6 +740,7 @@ class LSTMRhymingPoetryGenerator:
                 max_words=max_words,
                 temperature=temperature,
                 top_k=top_k,
+                max_context_tokens=max_context_tokens,
             )
             score = self._line_score(words, min_words)
             if score is None:
@@ -772,11 +774,12 @@ class LSTMRhymingPoetryGenerator:
         self,
         target_word,
         context_ids,
-        max_attempts=50,
+        max_attempts=20,
         min_words=4,
         max_words=9,
         temperature=0.65,
-        top_k=40,
+        top_k=30,
+        max_context_tokens=60,
     ):
         """Генерация строки слева направо с последующим выбором рифмы."""
         if not self.model or not target_word:
@@ -790,28 +793,31 @@ class LSTMRhymingPoetryGenerator:
             max_words=max_words,
             temperature=temperature,
             top_k=top_k,
+            max_context_tokens=max_context_tokens,
         )
         if line and quality >= 0.5:
             return line, last_word
 
         fallback_line = self._generate_free_line(
             context_ids,
-            max_attempts=20,
+            max_attempts=max(6, max_attempts // 2),
             min_words=min_words,
             max_words=max_words,
             temperature=temperature,
             top_k=top_k,
+            max_context_tokens=max_context_tokens,
         )
         return fallback_line, None
 
     def _generate_free_line(
         self,
         context_ids,
-        max_attempts=25,
+        max_attempts=12,
         min_words=4,
         max_words=9,
         temperature=0.65,
-        top_k=40,
+        top_k=30,
+        max_context_tokens=60,
     ):
         """Генерация свободной строки слева направо."""
         if not self.model:
@@ -825,6 +831,7 @@ class LSTMRhymingPoetryGenerator:
             max_words=max_words,
             temperature=temperature,
             top_k=top_k,
+            max_context_tokens=max_context_tokens,
         )
         return line
 
@@ -836,7 +843,15 @@ class LSTMRhymingPoetryGenerator:
         return list(clean[:length])
 
     def generate_poem(
-        self, lines=8, rhyme_scheme="AABB", start_line=None, temperature=0.65
+        self,
+        lines=8,
+        rhyme_scheme="AABB",
+        start_line=None,
+        temperature=0.65,
+        free_line_candidates=12,
+        rhyme_candidates=20,
+        top_k=30,
+        max_context_tokens=60,
     ):
         """Генерация стихотворения с метриками"""
         if not self.model or not self.rhyme_search:
@@ -866,9 +881,12 @@ class LSTMRhymingPoetryGenerator:
             if rhyme_letter not in rhyme_map:
                 line = self._generate_free_line(
                     context_ids,
+                    max_attempts=free_line_candidates,
                     min_words=5,
                     max_words=10,
                     temperature=temperature,
+                    top_k=top_k,
+                    max_context_tokens=max_context_tokens,
                 )
                 if not line:
                     continue
@@ -883,9 +901,12 @@ class LSTMRhymingPoetryGenerator:
                 line, rhyme_word = self._generate_line_with_rhyme(
                     target_word,
                     context_ids,
+                    max_attempts=rhyme_candidates,
                     min_words=5,
                     max_words=10,
                     temperature=temperature,
+                    top_k=top_k,
+                    max_context_tokens=max_context_tokens,
                 )
                 if not line:
                     continue

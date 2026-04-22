@@ -372,7 +372,13 @@ LLM используется в двух ролях.
 ```python
 EXPERIMENT_RUNS = 10
 EXPERIMENT_LLM_RUNS = 10
-GENERATION_RETRIES = 50
+MARKOV_GENERATION_RETRIES = 30
+LSTM_DEMO_RETRIES = 6
+LSTM_BATCH_RETRIES = 3
+LSTM_FREE_LINE_CANDIDATES = 10
+LSTM_RHYME_CANDIDATES = 14
+LSTM_TOP_K = 30
+LSTM_MAX_CONTEXT_TOKENS = 60
 REPORTS_DIR = "/content/poetry/reports"
 AUTO_DOWNLOAD_REPORTS = False
 ```
@@ -383,7 +389,11 @@ AUTO_DOWNLOAD_REPORTS = False
 EXPERIMENT_RUNS = 20
 ```
 
-`GENERATION_RETRIES` нужен потому, что LSTM иногда возвращает меньше строк, чем запрошено. Теперь notebook не берёт первый неполный результат, а повторяет генерацию и старается получить ровно `POEM_LINES` строк.
+`MARKOV_GENERATION_RETRIES` задаёт количество повторных попыток для Markov.
+
+`LSTM_DEMO_RETRIES` задаёт число повторов для одного демонстрационного стихотворения после обучения.
+
+`LSTM_BATCH_RETRIES` задаёт число повторов для каждой LSTM-генерации в batch-эксперименте. Оно сделано меньше, чтобы серия из 10-20 запусков не зависала слишком долго.
 
 `EXPERIMENT_LLM_RUNS` задаёт, сколько запусков отправлять в LLM-редактор и LLM-оценщик. Если есть ограничения API или долго выполняется оценка, это число можно уменьшить, например:
 
@@ -395,6 +405,17 @@ EXPERIMENT_LLM_RUNS = 3
 
 - средние формальные метрики по серии генераций;
 - средние LLM-оценки для Markov, LSTM, Markov + LLM и LSTM + LLM.
+
+Если LSTM после обучения слишком долго генерирует стихотворение, можно ускорить инференс так:
+
+```python
+LSTM_DEMO_RETRIES = 3
+LSTM_BATCH_RETRIES = 2
+LSTM_FREE_LINE_CANDIDATES = 6
+LSTM_RHYME_CANDIDATES = 10
+```
+
+Это уменьшит число перебираемых вариантов строк и количество внешних повторов, поэтому качество может немного снизиться, но генерация станет заметно быстрее.
 
 `REPORTS_DIR` задаёт папку, в которую notebook сохраняет CSV-отчёты.
 
