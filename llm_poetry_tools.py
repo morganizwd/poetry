@@ -21,10 +21,23 @@ except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
     genai = None
     types = None
 
+try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
+    torch = None
+
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
+    BitsAndBytesConfig = None
+
 
 VOWELS = "аеёиоуыэюя"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
+DEFAULT_TRANSFORMERS_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
 SCORE_FIELDS = [
     "semantic_coherence",
     "grammar",
@@ -60,6 +73,7 @@ class LLMConfig:
     retry_delay_seconds: float = 2.0
     request_timeout_seconds: float = 90.0
     ollama_base_url: str = "http://127.0.0.1:11434"
+    transformers_max_new_tokens: int = 320
 
 
 def _get_colab_secret(name: str) -> Optional[str]:
@@ -479,18 +493,27 @@ class LLMPoetryAssistant:
 
         self.api_key = api_key or get_gemini_api_key()
         self.client = None
+        self.tokenizer = None
         self.base_url: Optional[str] = None
+        self.device_label: str = "cpu"
         self.last_error: Optional[str] = None
 
-        if self.provider not in {"gemini", "ollama"}:
+        if self.provider in {"hf", "huggingface"}:
+            self.provider = "transformers"
+
+        if self.provider not in {"gemini", "ollama", "transformers"}:
             self.last_error = (
                 f"Unsupported LLM provider: {self.provider}. "
-                "Use 'gemini' or 'ollama'."
+                "Use 'gemini', 'ollama', or 'transformers'."
             )
             return
 
         if self.provider == "ollama":
             self._init_ollama(base_url=base_url)
+            return
+
+        if self.provider == "transformers":
+            self._init_transformers()
             return
 
         if genai is None:
@@ -525,6 +548,55 @@ class LLMPoetryAssistant:
 
         self.client = "ollama"
 
+    def _init_transformers(self) -> None:
+        if AutoModelForCausalLM is None or AutoTokenizer is None or torch is None:
+            self.last_error = (
+                "Не установлены transformers/torch. "
+                "Добавьте transformers и accelerate в Colab и перезапустите ячейку."
+            )
+            return
+
+        if not self.config.model_name or self.config.model_name in {
+            DEFAULT_GEMINI_MODEL,
+            DEFAULT_OLLAMA_MODEL,
+        }:
+            self.config.model_name = DEFAULT_TRANSFORMERS_MODEL
+
+        if not torch.cuda.is_available():
+            self.last_error = (
+                "Enable a GPU runtime in Colab "
+                "(Runtime -> Change runtime type -> T4 GPU) and rerun this cell."
+            )
+            return
+
+        model_kwargs: Dict[str, Any] = {
+            "low_cpu_mem_usage": True,
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+        }
+        self.device_label = "cuda"
+        if BitsAndBytesConfig is not None:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
+            self.client = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                **model_kwargs,
+            )
+            self.client.eval()
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+        except Exception as exc:
+            self.client = None
+            self.tokenizer = None
+            self.last_error = f"Не удалось загрузить локальную модель transformers: {exc}"
+
     def is_available(self) -> bool:
         """Return True if the selected LLM backend is ready."""
 
@@ -541,6 +613,12 @@ class LLMPoetryAssistant:
                 f"Ollama / {self.config.model_name} / {self.base_url}"
             )
 
+        if self.is_available() and self.provider == "transformers":
+            return (
+                "LLM-модуль готов: "
+                f"Transformers / {self.config.model_name} / {self.device_label}"
+            )
+
         if self.is_available():
             return f"LLM-модуль готов: {self.config.model_name}"
         return self.last_error or "LLM-модуль недоступен."
@@ -551,6 +629,13 @@ class LLMPoetryAssistant:
         temperature: float,
         response_mime_type: Optional[str] = None,
     ) -> str:
+        if self.provider == "transformers":
+            return self._generate_transformers(
+                prompt,
+                temperature=temperature,
+                response_mime_type=response_mime_type,
+            )
+
         if self.provider == "ollama":
             return self._generate_ollama(
                 prompt,
@@ -584,6 +669,67 @@ class LLMPoetryAssistant:
                     time.sleep(self.config.retry_delay_seconds * (attempt + 1))
 
         raise RuntimeError(f"Ошибка Gemini API: {last_exc}")
+
+    def _generate_transformers(
+        self,
+        prompt: str,
+        temperature: float,
+        response_mime_type: Optional[str] = None,
+    ) -> str:
+        if not self.client or not self.tokenizer or torch is None:
+            raise RuntimeError(self.status_message())
+
+        messages = [{"role": "user", "content": prompt}]
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            rendered_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            rendered_prompt = prompt
+
+        encoded = self.tokenizer(
+            rendered_prompt,
+            return_tensors="pt",
+            padding=False,
+        )
+        target_device = getattr(self.client, "device", None) or self.device_label
+        encoded = {key: value.to(target_device) for key, value in encoded.items()}
+
+        generate_kwargs: Dict[str, Any] = {
+            "max_new_tokens": self.config.transformers_max_new_tokens,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+        }
+        if temperature > 0:
+            generate_kwargs["do_sample"] = True
+            generate_kwargs["temperature"] = max(0.05, float(temperature))
+        else:
+            generate_kwargs["do_sample"] = False
+
+        with torch.no_grad():
+            output = self.client.generate(
+                **encoded,
+                **generate_kwargs,
+            )
+
+        prompt_token_count = encoded["input_ids"].shape[1]
+        generated_tokens = output[0][prompt_token_count:]
+        generated_text = self.tokenizer.decode(
+            generated_tokens,
+            skip_special_tokens=True,
+        ).strip()
+
+        if response_mime_type == "application/json":
+            match = re.search(r"\{.*\}", generated_text, flags=re.S)
+            if match:
+                generated_text = match.group(0)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return generated_text
 
     def _generate_ollama(
         self,
