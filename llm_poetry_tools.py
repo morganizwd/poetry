@@ -1,18 +1,14 @@
-"""LLM-based editing and evaluation helpers for the poetry project.
+"""LLM-based editing, evaluation, and reporting helpers for the poetry project."""
 
-The local Markov and LSTM models stay responsible for draft generation.
-This module adds an optional post-processing layer:
-
-1. edit a generated draft without replacing the base generator;
-2. evaluate semantic quality with a fixed rubric;
-3. calculate simple formal metrics for raw and edited poems.
-"""
-
+import csv
 import json
 import os
 import re
+import statistics
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -31,6 +27,20 @@ SCORE_FIELDS = [
     "theme_consistency",
     "poetic_quality",
     "overall",
+]
+REPORT_NUMERIC_FIELDS = [
+    "requested_lines",
+    "actual_lines",
+    "word_count_total",
+    "char_count_total",
+    "unique_line_count",
+    "rhyme_success",
+    "rhyme_quality",
+    "unique_rate",
+    "unique_words",
+    "avg_words_per_line",
+    "avg_vowels_per_line",
+    *SCORE_FIELDS,
 ]
 
 
@@ -209,6 +219,221 @@ def build_formal_metrics_table(
         row.update(calculate_formal_metrics(poem, rhyme_scheme=rhyme_scheme))
         rows.append(row)
     return rows
+
+
+def poem_lines_to_columns(
+    poem: Sequence[str] | str | None,
+    max_lines: int = 16,
+) -> Dict[str, str]:
+    """Expand poem lines into fixed CSV-friendly columns."""
+
+    lines = normalize_poem(poem)
+    columns = {}
+    for index in range(max_lines):
+        key = f"line_{index + 1}"
+        columns[key] = lines[index] if index < len(lines) else ""
+    return columns
+
+
+def detect_source_model(version_name: str) -> str:
+    """Infer the base model from a version label."""
+
+    label = str(version_name)
+    if "Markov" in label:
+        return "Markov"
+    if "LSTM" in label:
+        return "LSTM"
+    return ""
+
+
+def build_poem_report_row(
+    version: str,
+    poem: Sequence[str] | str | None,
+    report_scope: str = "batch",
+    run: Optional[int] = None,
+    source_model: Optional[str] = None,
+    stage: Optional[str] = None,
+    start_line: str = "",
+    rhyme_scheme: str = "AABB",
+    requested_lines: Optional[int] = None,
+    llm_model_name: str = "",
+    metrics: Optional[Dict[str, Any]] = None,
+    evaluation: Optional[Dict[str, Any]] = None,
+    max_lines: int = 16,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build one detailed CSV row for a poem version."""
+
+    lines = normalize_poem(poem)
+    text = poem_to_text(lines)
+    metrics = metrics or calculate_formal_metrics(lines, rhyme_scheme=rhyme_scheme)
+    evaluation = evaluation or {}
+    source_model = source_model or detect_source_model(version)
+    stage = stage or ("llm_edited" if "+ LLM" in str(version) else "raw")
+    words = tokenize_russian(text)
+
+    row: Dict[str, Any] = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "report_scope": report_scope,
+        "run": run if run is not None else "",
+        "source_model": source_model,
+        "version": version,
+        "stage": stage,
+        "llm_used": "yes" if stage == "llm_edited" else "no",
+        "llm_model_name": llm_model_name if llm_model_name else "",
+        "start_line": start_line.strip() if start_line else "",
+        "rhyme_scheme": rhyme_scheme,
+        "requested_lines": requested_lines if requested_lines is not None else len(lines),
+        "actual_lines": len(lines),
+        "unique_line_count": len({line.lower() for line in lines}),
+        "word_count_total": len(words),
+        "char_count_total": len(text),
+        "poem_text": text,
+    }
+    row.update(poem_lines_to_columns(lines, max_lines=max_lines))
+    row.update(metrics)
+
+    for field in SCORE_FIELDS:
+        row[field] = evaluation.get(field, "")
+    row["llm_comment"] = evaluation.get("comment", "")
+    row["llm_raw_response"] = evaluation.get("raw_response", "")
+
+    if extra:
+        row.update(extra)
+
+    return row
+
+
+def summarize_report_rows(
+    rows: Sequence[Dict[str, Any]],
+    group_fields: Sequence[str] = ("report_scope", "version", "stage"),
+) -> List[Dict[str, Any]]:
+    """Aggregate detailed report rows into a compact summary table."""
+
+    grouped: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = tuple(row.get(field, "") for field in group_fields)
+        grouped.setdefault(key, []).append(row)
+
+    summary_rows = []
+    for key, group in grouped.items():
+        summary = {field: value for field, value in zip(group_fields, key)}
+        summary["row_count"] = len(group)
+        summary["source_model"] = group[0].get("source_model", "")
+        summary["llm_used"] = group[0].get("llm_used", "")
+        summary["llm_model_name"] = group[0].get("llm_model_name", "")
+
+        for field in REPORT_NUMERIC_FIELDS:
+            values = []
+            for row in group:
+                value = row.get(field, "")
+                if value in ("", None):
+                    continue
+                try:
+                    values.append(float(value))
+                except Exception:
+                    continue
+            summary[f"mean_{field}"] = (
+                round(statistics.mean(values), 3) if values else ""
+            )
+
+        comments = [str(row.get("llm_comment", "")).strip() for row in group]
+        comments = [comment for comment in comments if comment]
+        summary["sample_comment"] = comments[0] if comments else ""
+        summary_rows.append(summary)
+
+    return summary_rows
+
+
+def write_csv_report(
+    rows: Sequence[Dict[str, Any]],
+    output_path: str | Path,
+    preferred_fields: Optional[Sequence[str]] = None,
+) -> str:
+    """Write rows to CSV and return the resulting path."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    preferred_fields = list(preferred_fields or [])
+    keys = []
+    for row in rows:
+        for key in row.keys():
+            if key not in keys:
+                keys.append(key)
+
+    extra_fields = [key for key in keys if key not in preferred_fields]
+    fieldnames = preferred_fields + extra_fields
+
+    with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+    return str(path)
+
+
+def export_report_bundle(
+    rows: Sequence[Dict[str, Any]],
+    output_dir: str | Path,
+    prefix: str = "poetry_report",
+    summary_group_fields: Sequence[str] = ("report_scope", "version", "stage"),
+) -> Dict[str, Any]:
+    """Export detailed and summary CSV reports."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    preferred_detail_fields = [
+        "created_at",
+        "report_scope",
+        "run",
+        "source_model",
+        "version",
+        "stage",
+        "llm_used",
+        "llm_model_name",
+        "start_line",
+        "rhyme_scheme",
+        "requested_lines",
+        "actual_lines",
+        "unique_line_count",
+        "word_count_total",
+        "char_count_total",
+        "rhyme_success",
+        "rhyme_quality",
+        "unique_rate",
+        "unique_words",
+        "avg_words_per_line",
+        "avg_vowels_per_line",
+        *SCORE_FIELDS,
+        "llm_comment",
+        "llm_raw_response",
+        "poem_text",
+    ] + [f"line_{index}" for index in range(1, 17)]
+
+    detailed_rows = list(rows)
+    summary_rows = summarize_report_rows(
+        detailed_rows, group_fields=summary_group_fields
+    )
+    detailed_path = output_dir / f"{prefix}_detailed_{timestamp}.csv"
+    summary_path = output_dir / f"{prefix}_summary_{timestamp}.csv"
+
+    write_csv_report(
+        detailed_rows,
+        detailed_path,
+        preferred_fields=preferred_detail_fields,
+    )
+    write_csv_report(summary_rows, summary_path)
+
+    return {
+        "detailed_path": str(detailed_path),
+        "summary_path": str(summary_path),
+        "detailed_rows": detailed_rows,
+        "summary_rows": summary_rows,
+    }
 
 
 class LLMPoetryAssistant:
