@@ -6,6 +6,8 @@ import os
 import re
 import statistics
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +23,8 @@ except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
 
 
 VOWELS = "аеёиоуыэюя"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
 SCORE_FIELDS = [
     "semantic_coherence",
     "grammar",
@@ -46,13 +50,16 @@ REPORT_NUMERIC_FIELDS = [
 
 @dataclass
 class LLMConfig:
-    """Configuration for the optional Gemini editor/evaluator."""
+    """Configuration for the optional LLM editor/evaluator."""
 
-    model_name: str = "gemini-2.5-flash-lite"
+    provider: str = "gemini"
+    model_name: str = DEFAULT_GEMINI_MODEL
     editor_temperature: float = 0.35
     evaluator_temperature: float = 0.0
     max_retries: int = 2
     retry_delay_seconds: float = 2.0
+    request_timeout_seconds: float = 90.0
+    ollama_base_url: str = "http://127.0.0.1:11434"
 
 
 def _get_colab_secret(name: str) -> Optional[str]:
@@ -75,6 +82,23 @@ def get_gemini_api_key() -> Optional[str]:
         or os.getenv("GOOGLE_API_KEY")
         or _get_colab_secret("GEMINI_API_KEY")
         or _get_colab_secret("GOOGLE_API_KEY")
+    )
+
+
+def get_llm_provider() -> Optional[str]:
+    """Find the selected LLM provider in environment variables or Colab Secrets."""
+
+    return os.getenv("LLM_PROVIDER") or _get_colab_secret("LLM_PROVIDER")
+
+
+def get_ollama_base_url() -> Optional[str]:
+    """Find the Ollama base URL in environment variables or Colab Secrets."""
+
+    return (
+        os.getenv("OLLAMA_BASE_URL")
+        or _get_colab_secret("OLLAMA_BASE_URL")
+        or os.getenv("OLLAMA_HOST")
+        or _get_colab_secret("OLLAMA_HOST")
     )
 
 
@@ -437,21 +461,37 @@ def export_report_bundle(
 
 
 class LLMPoetryAssistant:
-    """Optional Gemini-based editor and evaluator."""
+    """Optional LLM-based editor and evaluator."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         config: Optional[LLMConfig] = None,
         model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.config = config or LLMConfig()
+        provider_value = provider or get_llm_provider() or self.config.provider
+        self.provider = str(provider_value).strip().lower() or "gemini"
         if model_name:
             self.config.model_name = model_name
 
         self.api_key = api_key or get_gemini_api_key()
         self.client = None
+        self.base_url: Optional[str] = None
         self.last_error: Optional[str] = None
+
+        if self.provider not in {"gemini", "ollama"}:
+            self.last_error = (
+                f"Unsupported LLM provider: {self.provider}. "
+                "Use 'gemini' or 'ollama'."
+            )
+            return
+
+        if self.provider == "ollama":
+            self._init_ollama(base_url=base_url)
+            return
 
         if genai is None:
             self.last_error = "Не установлена библиотека google-genai."
@@ -469,13 +509,37 @@ class LLMPoetryAssistant:
         except Exception as exc:
             self.last_error = f"Не удалось создать Gemini client: {exc}"
 
-    def is_available(self) -> bool:
-        """Return True if the Gemini client is ready."""
+    def _init_ollama(self, base_url: Optional[str] = None) -> None:
+        if not self.config.model_name or self.config.model_name == DEFAULT_GEMINI_MODEL:
+            self.config.model_name = DEFAULT_OLLAMA_MODEL
 
+        ollama_base_url = base_url or get_ollama_base_url() or self.config.ollama_base_url
+        self.base_url = str(ollama_base_url).rstrip("/") if ollama_base_url else None
+
+        if not self.base_url:
+            self.last_error = (
+                "OLLAMA_BASE_URL is not set. In Colab, point it to a public tunnel "
+                "that forwards requests to your local Ollama server."
+            )
+            return
+
+        self.client = "ollama"
+
+    def is_available(self) -> bool:
+        """Return True if the selected LLM backend is ready."""
+
+        if self.provider == "ollama":
+            return bool(self.base_url and self.client)
         return self.client is not None
 
     def status_message(self) -> str:
         """Return a user-facing status line."""
+
+        if self.is_available() and self.provider == "ollama":
+            return (
+                "LLM-Ð¼Ð¾Ð´ÑƒÐ»ÑŒ Ð³Ð¾Ñ‚Ð¾Ð²: "
+                f"Ollama / {self.config.model_name} / {self.base_url}"
+            )
 
         if self.is_available():
             return f"LLM-модуль готов: {self.config.model_name}"
@@ -487,6 +551,13 @@ class LLMPoetryAssistant:
         temperature: float,
         response_mime_type: Optional[str] = None,
     ) -> str:
+        if self.provider == "ollama":
+            return self._generate_ollama(
+                prompt,
+                temperature=temperature,
+                response_mime_type=response_mime_type,
+            )
+
         if not self.client:
             raise RuntimeError(self.status_message())
 
@@ -513,6 +584,53 @@ class LLMPoetryAssistant:
                     time.sleep(self.config.retry_delay_seconds * (attempt + 1))
 
         raise RuntimeError(f"Ошибка Gemini API: {last_exc}")
+
+    def _generate_ollama(
+        self,
+        prompt: str,
+        temperature: float,
+        response_mime_type: Optional[str] = None,
+    ) -> str:
+        if not self.base_url:
+            raise RuntimeError(self.status_message())
+
+        endpoint = f"{self.base_url}/api/generate"
+        payload: Dict[str, Any] = {
+            "model": self.config.model_name,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
+        if response_mime_type == "application/json":
+            payload["format"] = "json"
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                request = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.config.request_timeout_seconds,
+                ) as response:
+                    response_data = json.loads(response.read().decode("utf-8"))
+                return str(response_data.get("response", "")).strip()
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_exc = RuntimeError(
+                    f"Ollama HTTP {exc.code}: {error_body or exc.reason}"
+                )
+            except Exception as exc:
+                last_exc = exc
+
+            if attempt < self.config.max_retries:
+                time.sleep(self.config.retry_delay_seconds * (attempt + 1))
+
+        raise RuntimeError(f"Ollama API error: {last_exc}")
 
     def edit_poem(
         self,

@@ -373,12 +373,12 @@ LLM используется в двух ролях.
 EXPERIMENT_RUNS = 10
 EXPERIMENT_LLM_RUNS = 10
 MARKOV_GENERATION_RETRIES = 30
-LSTM_DEMO_RETRIES = 6
-LSTM_BATCH_RETRIES = 3
-LSTM_FREE_LINE_CANDIDATES = 10
-LSTM_RHYME_CANDIDATES = 14
-LSTM_TOP_K = 30
-LSTM_MAX_CONTEXT_TOKENS = 60
+LSTM_DEMO_RETRIES = 2
+LSTM_BATCH_RETRIES = 1
+LSTM_FREE_LINE_CANDIDATES = 6
+LSTM_RHYME_CANDIDATES = 8
+LSTM_TOP_K = 25
+LSTM_MAX_CONTEXT_TOKENS = 48
 REPORTS_DIR = "/content/poetry/reports"
 AUTO_DOWNLOAD_REPORTS = False
 ```
@@ -409,10 +409,10 @@ EXPERIMENT_LLM_RUNS = 3
 Если LSTM после обучения слишком долго генерирует стихотворение, можно ускорить инференс так:
 
 ```python
-LSTM_DEMO_RETRIES = 3
-LSTM_BATCH_RETRIES = 2
+LSTM_DEMO_RETRIES = 2
+LSTM_BATCH_RETRIES = 1
 LSTM_FREE_LINE_CANDIDATES = 6
-LSTM_RHYME_CANDIDATES = 10
+LSTM_RHYME_CANDIDATES = 8
 ```
 
 Это уменьшит число перебираемых вариантов строк и количество внешних повторов, поэтому качество может немного снизиться, но генерация станет заметно быстрее.

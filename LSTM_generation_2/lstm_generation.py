@@ -667,6 +667,14 @@ class LSTMRhymingPoetryGenerator:
         """Ограничение контекста, чтобы attention не становился слишком тяжёлым."""
         return token_ids[-max_context_tokens:]
 
+    def _prepare_generation_input(self, token_ids, max_context_tokens=60):
+        """Подготовка контекста фиксированной длины для более быстрого инференса."""
+        trimmed = self._trim_context(token_ids, max_context_tokens)
+        pad_id = self.vocab["<pad>"]
+        if len(trimmed) < max_context_tokens:
+            trimmed = [pad_id] * (max_context_tokens - len(trimmed)) + trimmed
+        return tf.convert_to_tensor([trimmed], dtype=tf.int32)
+
     def _generate_candidate_words(
         self,
         context_ids,
@@ -681,8 +689,7 @@ class LSTMRhymingPoetryGenerator:
         words = []
 
         for _ in range(max_words * 2):
-            input_ids = self._trim_context(tokens, max_context_tokens)
-            input_seq = tf.convert_to_tensor([input_ids], dtype=tf.int32)
+            input_seq = self._prepare_generation_input(tokens, max_context_tokens)
             logits = self.model(input_seq, training=False)[0, -1, :].numpy()
             next_token = self._sample_next_token(
                 logits,
