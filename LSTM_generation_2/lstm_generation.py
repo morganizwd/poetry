@@ -19,6 +19,7 @@ import statistics
 
 # МЕХАНИЗМ ВНИМАНИЯ БАХДАНАУ (Additive Attention)
 
+@tf.keras.utils.register_keras_serializable(package="poetry")
 class BahdanauAttention(Layer):
     """Простой causal additive attention для языковой модели"""
 
@@ -26,11 +27,22 @@ class BahdanauAttention(Layer):
         super(BahdanauAttention, self).__init__(**kwargs)
         self.units = units
         self.supports_masking = True
+        self.W_query = None
+        self.W_value = None
+        self.V = None
+        self._build_input_shape = None
 
     def build(self, input_shape):
-        self.W_query = Dense(self.units, use_bias=False)
-        self.W_value = Dense(self.units, use_bias=False)
-        self.V = Dense(1, use_bias=False)
+        input_shape = tf.TensorShape(input_shape)
+        self._build_input_shape = input_shape
+
+        self.W_query = Dense(self.units, use_bias=False, name="query_projection")
+        self.W_value = Dense(self.units, use_bias=False, name="value_projection")
+        self.V = Dense(1, use_bias=False, name="score_projection")
+
+        self.W_query.build(input_shape)
+        self.W_value.build(input_shape)
+        self.V.build(tf.TensorShape([None, None, None, self.units]))
         super(BahdanauAttention, self).build(input_shape)
 
     def call(self, values, mask=None):
@@ -73,6 +85,16 @@ class BahdanauAttention(Layer):
         config = super(BahdanauAttention, self).get_config()
         config.update({'units': self.units})
         return config
+
+    def get_build_config(self):
+        if self._build_input_shape is None:
+            return {}
+        return {"input_shape": self._build_input_shape.as_list()}
+
+    def build_from_config(self, config):
+        input_shape = config.get("input_shape")
+        if input_shape:
+            self.build(input_shape)
 
 
 # КЛАСС ДЛЯ ПОИСКА РИФМ
@@ -226,25 +248,33 @@ class MetricsCollector:
 class LSTMRhymingPoetryGenerator:
     """Генератор стихов с контролем рифмы и механизмом внимания Бахданау"""
 
-    MODEL_VERSION = 5
+    MODEL_VERSION = 6
 
     def __init__(self, model_name="poet"):
         self.model_name = model_name
         self.vowels = "аеёиоуыэюя"
         self.model = None
         self.rhyme_search = None
-        self.vocab = {
+        self.vocab = self._create_base_vocab()
+        self.id2word = {v: k for k, v in self.vocab.items()}
+        self.VOCAB_SIZE = len(self.vocab)
+        self.original_lines = set()
+        self.poems = []
+        self.metrics = MetricsCollector()
+
+    def _create_base_vocab(self):
+        return {
             "<pad>": 0,
             "<unk>": 1,
             "<bos>": 2,
             "<eos>": 3,
             "<line>": 4,
         }
+
+    def _reset_vocab(self):
+        self.vocab = self._create_base_vocab()
         self.id2word = {v: k for k, v in self.vocab.items()}
         self.VOCAB_SIZE = len(self.vocab)
-        self.original_lines = set()
-        self.poems = []
-        self.metrics = MetricsCollector()
 
     def _tokenize_russian(self, text):
         """Токенизация"""
@@ -360,39 +390,49 @@ class LSTMRhymingPoetryGenerator:
                 self.id2word = {int(k): v for k, v in metadata["id2word"].items()}
                 self.VOCAB_SIZE = metadata["vocab_size"]
 
-                self.model = load_model(
-                    model_path,
-                    custom_objects={'BahdanauAttention': BahdanauAttention},
-                    compile=False,
-                )
-                self._compile_model(self.model)
-
-                self.rhyme_search = RhymeSearch()
-                with open(rhymes_path, "r", encoding="utf-8") as f:
-                    rhymes_data = json.load(f)
-                    self.rhyme_search.rhymes_dict = defaultdict(list, rhymes_data)
-
-                if os.path.exists(filepath):
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        content = f.read()
-
-                    self.original_lines = {
-                        line.strip()
-                        for line in content.split("\n")
-                        if line.strip() and len(line.strip()) > 10
-                    }
-
-                    self.poems = [
-                        p.strip() for p in content.split("\n\n") if p.strip()
-                    ]
-                else:
-                    print(
-                        "Файл датасета не найден, "
-                        "проверка копирования строк пропущена."
+                try:
+                    self.model = load_model(
+                        model_path,
+                        custom_objects={'BahdanauAttention': BahdanauAttention},
+                        compile=False,
                     )
+                    self._compile_model(self.model)
+                except Exception as exc:
+                    print("Не удалось загрузить сохранённую модель.")
+                    print(f"Причина: {exc}")
+                    print(
+                        "Кэш модели несовместим с текущей версией Keras/кода. "
+                        "Обучаем заново и затем перезапишем кэш."
+                    )
+                    self.model = None
+                    self._reset_vocab()
+                else:
+                    self.rhyme_search = RhymeSearch()
+                    with open(rhymes_path, "r", encoding="utf-8") as f:
+                        rhymes_data = json.load(f)
+                        self.rhyme_search.rhymes_dict = defaultdict(list, rhymes_data)
 
-                print("Модель загружена")
-                return True
+                    if os.path.exists(filepath):
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            content = f.read()
+
+                        self.original_lines = {
+                            line.strip()
+                            for line in content.split("\n")
+                            if line.strip() and len(line.strip()) > 10
+                        }
+
+                        self.poems = [
+                            p.strip() for p in content.split("\n\n") if p.strip()
+                        ]
+                    else:
+                        print(
+                            "Файл датасета не найден, "
+                            "проверка копирования строк пропущена."
+                        )
+
+                    print("Модель загружена")
+                    return True
 
             print("Сохранённая модель создана старой версией кода. Обучаем заново.")
 
