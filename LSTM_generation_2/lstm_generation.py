@@ -337,10 +337,10 @@ class LSTMRhymingPoetryGenerator:
             return False
 
         stop_ratio = 1 - len(content_words) / len(words)
-        if stop_ratio > 0.6:
+        if stop_ratio > 0.75:
             return False
 
-        if not any(len(word) >= 5 for word in words):
+        if not any(len(word) >= 4 for word in words):
             return False
 
         return True
@@ -763,7 +763,7 @@ class LSTMRhymingPoetryGenerator:
                 rhyme_quality = self.metrics.calculate_rhyme_quality(
                     target_word, line
                 )
-                if rhyme_quality < 0.5:
+                if rhyme_quality < 0.2:
                     continue
                 score += rhyme_quality * 3
 
@@ -889,7 +889,7 @@ class LSTMRhymingPoetryGenerator:
                 line = self._generate_free_line(
                     context_ids,
                     max_attempts=free_line_candidates,
-                    min_words=5,
+                    min_words=4,
                     max_words=10,
                     temperature=temperature,
                     top_k=top_k,
@@ -909,7 +909,7 @@ class LSTMRhymingPoetryGenerator:
                     target_word,
                     context_ids,
                     max_attempts=rhyme_candidates,
-                    min_words=5,
+                    min_words=4,
                     max_words=10,
                     temperature=temperature,
                     top_k=top_k,
