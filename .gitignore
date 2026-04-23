@@ -1,6 +1,62 @@
-.venv/
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+
+# Coverage and test output
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs / temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Local secrets
+.env
+.env.*
+*.env
+!.env.example
 
 # Runtime artifacts
 data/
@@ -18,6 +74,7 @@ LSTM_generation_2/poet_rhymes.json
 LSTM_generation_2/poet_quick_model.keras
 LSTM_generation_2/poet_quick_metadata.json
 LSTM_generation_2/poet_quick_rhymes.json
+LSTM_generation_2/*.h5
 
 # Generated Markov artifacts
 Markov_chain_2/poet_markov_rhymes.json
