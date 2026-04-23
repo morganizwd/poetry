@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime artifacts
+data/
+reports/
+cache/
+
+# Generated datasets inside model folders
+LSTM_generation_2/poems_clean.txt
+Markov_chain_2/poems_clean.txt
+
+# Generated LSTM artifacts
+LSTM_generation_2/poet_model.keras
+LSTM_generation_2/poet_metadata.json
+LSTM_generation_2/poet_rhymes.json
+LSTM_generation_2/poet_quick_model.keras
+LSTM_generation_2/poet_quick_metadata.json
+LSTM_generation_2/poet_quick_rhymes.json
+
+# Generated Markov artifacts
+Markov_chain_2/poet_markov_rhymes.json

@@ -33,6 +33,11 @@ except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
     AutoTokenizer = None
     BitsAndBytesConfig = None
 
+try:
+    import httpx
+except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
+    httpx = None
+
 
 VOWELS = "аеёиоуыэюя"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -40,6 +45,11 @@ DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
 DEFAULT_TRANSFORMERS_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/136.0.0.0 Safari/537.36 PoetryDesktop/1.0"
+)
 SCORE_FIELDS = [
     "semantic_coherence",
     "grammar",
@@ -544,8 +554,8 @@ class LLMPoetryAssistant:
 
         if not self.api_key:
             self.last_error = (
-                "Не найден GEMINI_API_KEY. Добавьте ключ в Colab Secrets "
-                "или в переменную окружения."
+                "Не найден GEMINI_API_KEY. Добавьте ключ в переменную окружения "
+                "или, если вы всё же запускаете ноутбук в Colab, в Colab Secrets."
             )
             return
 
@@ -563,8 +573,8 @@ class LLMPoetryAssistant:
 
         if not self.base_url:
             self.last_error = (
-                "OLLAMA_BASE_URL is not set. In Colab, point it to a public tunnel "
-                "that forwards requests to your local Ollama server."
+                "OLLAMA_BASE_URL is not set. Point it to your local Ollama server "
+                "or to a tunnel URL if you access Ollama remotely."
             )
             return
 
@@ -580,8 +590,8 @@ class LLMPoetryAssistant:
         if not self.api_key:
             self.last_error = (
                 "Не найден GROQ_API_KEY. "
-                "Получите бесплатный ключ на console.groq.com (без кредитной карты) "
-                "и добавьте в Colab Secrets или переменную окружения GROQ_API_KEY."
+                "Получите бесплатный ключ на console.groq.com и добавьте "
+                "переменную окружения GROQ_API_KEY."
             )
             return
 
@@ -606,30 +616,70 @@ class LLMPoetryAssistant:
             payload["response_format"] = {"type": "json_object"}
 
         last_exc: Optional[Exception] = None
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": GROQ_USER_AGENT,
+        }
+
         for attempt in range(self.config.max_retries + 1):
             try:
-                request = urllib.request.Request(
-                    GROQ_API_URL,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.api_key}",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(
-                    request,
-                    timeout=self.config.request_timeout_seconds,
-                ) as response:
-                    data = json.loads(response.read().decode("utf-8"))
+                if httpx is not None:
+                    with httpx.Client(
+                        timeout=self.config.request_timeout_seconds,
+                        follow_redirects=True,
+                    ) as client:
+                        response = client.post(
+                            GROQ_API_URL,
+                            json=payload,
+                            headers=headers,
+                        )
+                    response.raise_for_status()
+                    data = response.json()
+                else:
+                    request = urllib.request.Request(
+                        GROQ_API_URL,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers=headers,
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(
+                        request,
+                        timeout=self.config.request_timeout_seconds,
+                    ) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
                 return data["choices"][0]["message"]["content"].strip()
-            except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode("utf-8", errors="replace")
-                last_exc = RuntimeError(
-                    f"Groq HTTP {exc.code}: {error_body or exc.reason}"
-                )
             except Exception as exc:
-                last_exc = exc
+                if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+                    error_body = exc.response.text
+                    if exc.response.status_code == 403 and "1010" in error_body:
+                        last_exc = RuntimeError(
+                            "Groq HTTP 403 / Cloudflare 1010. "
+                            "Запрос заблокирован Browser Integrity Check или WAF. "
+                            "Ключ может быть корректным, но текущий IP/сигнатура клиента отклонены."
+                        )
+                    else:
+                        last_exc = RuntimeError(
+                            f"Groq HTTP {exc.response.status_code}: {error_body}"
+                        )
+                elif httpx is not None and isinstance(exc, httpx.HTTPError):
+                    last_exc = RuntimeError(f"Groq HTTP client error: {exc}")
+                elif isinstance(exc, urllib.error.HTTPError):
+                    error_body = exc.read().decode("utf-8", errors="replace")
+                    if exc.code == 403 and "1010" in error_body:
+                        last_exc = RuntimeError(
+                            "Groq HTTP 403 / Cloudflare 1010. "
+                            "Запрос заблокирован Browser Integrity Check или WAF. "
+                            "Ключ может быть корректным, но текущий IP/сигнатура клиента отклонены."
+                        )
+                    else:
+                        last_exc = RuntimeError(
+                            f"Groq HTTP {exc.code}: {error_body or exc.reason}"
+                        )
+                else:
+                    last_exc = exc
 
             if attempt < self.config.max_retries:
                 time.sleep(self.config.retry_delay_seconds * (attempt + 1))
@@ -640,7 +690,7 @@ class LLMPoetryAssistant:
         if AutoModelForCausalLM is None or AutoTokenizer is None or torch is None:
             self.last_error = (
                 "Не установлены transformers/torch. "
-                "Добавьте transformers и accelerate в Colab и перезапустите ячейку."
+                "Установите transformers, accelerate и torch в локальное окружение."
             )
             return
 
@@ -653,8 +703,8 @@ class LLMPoetryAssistant:
         if not torch.cuda.is_available():
             self.last_error = (
                 "Для локального transformers-LLM нужна CUDA GPU. "
-                "В Colab включите T4 GPU, а локально либо используйте CUDA-окружение, "
-                "либо переключите LLM_PROVIDER на 'disabled' или 'ollama'."
+                "Используйте локальное CUDA-окружение или переключите "
+                "LLM_PROVIDER на 'disabled' или 'ollama'."
             )
             return
 
@@ -717,6 +767,38 @@ class LLMPoetryAssistant:
         if self.is_available():
             return f"LLM-модуль готов: {self.config.model_name}"
         return self.last_error or "LLM-модуль недоступен."
+
+    def test_connection(self) -> Dict[str, Any]:
+        """Run a tiny request to verify that the current backend actually responds."""
+
+        if not self.is_available():
+            return {
+                "ok": False,
+                "provider": self.provider,
+                "model_name": self.config.model_name,
+                "message": self.status_message(),
+            }
+
+        prompt = "Reply with exactly OK"
+        try:
+            response_text = self._generate(
+                prompt,
+                temperature=0.0,
+            ).strip()
+            return {
+                "ok": True,
+                "provider": self.provider,
+                "model_name": self.config.model_name,
+                "message": self.status_message(),
+                "response_text": response_text,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "provider": self.provider,
+                "model_name": self.config.model_name,
+                "message": f"{self.status_message()} | probe error: {exc}",
+            }
 
     def _generate(
         self,
