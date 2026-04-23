@@ -38,6 +38,8 @@ VOWELS = "аеёиоуыэюя"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
 DEFAULT_TRANSFORMERS_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 SCORE_FIELDS = [
     "semantic_coherence",
     "grammar",
@@ -67,13 +69,13 @@ class LLMConfig:
 
     provider: str = "gemini"
     model_name: str = DEFAULT_GEMINI_MODEL
-    editor_temperature: float = 0.35
+    editor_temperature: float = 0.7
     evaluator_temperature: float = 0.0
     max_retries: int = 2
     retry_delay_seconds: float = 2.0
     request_timeout_seconds: float = 90.0
     ollama_base_url: str = "http://127.0.0.1:11434"
-    transformers_max_new_tokens: int = 320
+    transformers_max_new_tokens: int = 256
 
 
 def _get_colab_secret(name: str) -> Optional[str]:
@@ -103,6 +105,12 @@ def get_llm_provider() -> Optional[str]:
     """Find the selected LLM provider in environment variables or Colab Secrets."""
 
     return os.getenv("LLM_PROVIDER") or _get_colab_secret("LLM_PROVIDER")
+
+
+def get_groq_api_key() -> Optional[str]:
+    """Find a Groq API key in environment variables or Colab Secrets."""
+
+    return os.getenv("GROQ_API_KEY") or _get_colab_secret("GROQ_API_KEY")
 
 
 def get_ollama_base_url() -> Optional[str]:
@@ -491,7 +499,6 @@ class LLMPoetryAssistant:
         if model_name:
             self.config.model_name = model_name
 
-        self.api_key = api_key or get_gemini_api_key()
         self.client = None
         self.tokenizer = None
         self.base_url: Optional[str] = None
@@ -506,11 +513,21 @@ class LLMPoetryAssistant:
             self.last_error = "LLM отключен текущими настройками."
             return
 
-        if self.provider not in {"gemini", "ollama", "transformers"}:
+        if self.provider not in {"gemini", "groq", "ollama", "transformers"}:
             self.last_error = (
                 f"Unsupported LLM provider: {self.provider}. "
-                "Use 'gemini', 'ollama', 'transformers', or 'disabled'."
+                "Use 'groq', 'gemini', 'ollama', 'transformers', or 'disabled'."
             )
+            return
+
+        # Resolve API key after provider is known so we look in the right place.
+        if self.provider == "groq":
+            self.api_key = api_key or get_groq_api_key()
+        else:
+            self.api_key = api_key or get_gemini_api_key()
+
+        if self.provider == "groq":
+            self._init_groq()
             return
 
         if self.provider == "ollama":
@@ -552,6 +569,72 @@ class LLMPoetryAssistant:
             return
 
         self.client = "ollama"
+
+    def _init_groq(self) -> None:
+        if not self.config.model_name or self.config.model_name in {
+            DEFAULT_GEMINI_MODEL,
+            DEFAULT_OLLAMA_MODEL,
+        }:
+            self.config.model_name = DEFAULT_GROQ_MODEL
+
+        if not self.api_key:
+            self.last_error = (
+                "Не найден GROQ_API_KEY. "
+                "Получите бесплатный ключ на console.groq.com (без кредитной карты) "
+                "и добавьте в Colab Secrets или переменную окружения GROQ_API_KEY."
+            )
+            return
+
+        self.client = "groq"
+
+    def _generate_groq(
+        self,
+        prompt: str,
+        temperature: float,
+        response_mime_type: Optional[str] = None,
+    ) -> str:
+        if not self.api_key:
+            raise RuntimeError(self.status_message())
+
+        payload: Dict[str, Any] = {
+            "model": self.config.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": max(0.0, float(temperature)),
+            "max_tokens": self.config.transformers_max_new_tokens,
+        }
+        if response_mime_type == "application/json":
+            payload["response_format"] = {"type": "json_object"}
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                request = urllib.request.Request(
+                    GROQ_API_URL,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.config.request_timeout_seconds,
+                ) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"].strip()
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_exc = RuntimeError(
+                    f"Groq HTTP {exc.code}: {error_body or exc.reason}"
+                )
+            except Exception as exc:
+                last_exc = exc
+
+            if attempt < self.config.max_retries:
+                time.sleep(self.config.retry_delay_seconds * (attempt + 1))
+
+        raise RuntimeError(f"Groq API error: {last_exc}")
 
     def _init_transformers(self) -> None:
         if AutoModelForCausalLM is None or AutoTokenizer is None or torch is None:
@@ -610,15 +693,19 @@ class LLMPoetryAssistant:
             return False
         if self.provider == "ollama":
             return bool(self.base_url and self.client)
+        if self.provider == "groq":
+            return self.client == "groq" and bool(self.api_key)
         return self.client is not None
 
     def status_message(self) -> str:
         """Return a user-facing status line."""
 
+        if self.is_available() and self.provider == "groq":
+            return f"LLM-модуль готов: Groq / {self.config.model_name}"
+
         if self.is_available() and self.provider == "ollama":
             return (
-                "LLM-Ð¼Ð¾Ð´ÑƒÐ»ÑŒ Ð³Ð¾Ñ‚Ð¾Ð²: "
-                f"Ollama / {self.config.model_name} / {self.base_url}"
+                f"LLM-модуль готов: Ollama / {self.config.model_name} / {self.base_url}"
             )
 
         if self.is_available() and self.provider == "transformers":
@@ -637,6 +724,13 @@ class LLMPoetryAssistant:
         temperature: float,
         response_mime_type: Optional[str] = None,
     ) -> str:
+        if self.provider == "groq":
+            return self._generate_groq(
+                prompt,
+                temperature=temperature,
+                response_mime_type=response_mime_type,
+            )
+
         if self.provider == "transformers":
             return self._generate_transformers(
                 prompt,
@@ -794,7 +888,7 @@ class LLMPoetryAssistant:
         preserve_first_line: bool = True,
         target_lines: Optional[int] = None,
     ) -> List[str]:
-        """Edit a generated draft while preserving the generator's role."""
+        """Rewrite a generated draft into a coherent poem using it as inspiration."""
 
         draft_lines = normalize_poem(draft_poem)
         if not draft_lines:
@@ -802,45 +896,45 @@ class LLMPoetryAssistant:
 
         requested_lines = max(0, int(target_lines or 0))
         expected_lines = max(len(draft_lines), requested_lines)
-        expansion_mode = expected_lines > len(draft_lines)
         draft_text = "\n".join(draft_lines)
-        first_line_rule = (
-            f'- Первую строку сохрани без изменений: "{start_line}".'
-            if preserve_first_line and start_line
-            else "- Первую строку можно слегка отредактировать, если это необходимо."
-        )
-        draft_role_rule = (
-            "- Черновик неполный или слабый. Преврати его в цельное стихотворение: "
-            "при необходимости заметно перепиши слабые строки и допиши недостающие, "
-            "но сохрани первую строку, тему и полезные образы черновика."
-            if expansion_mode
-            else "- Работай именно как редактор: улучшай черновик, а не заменяй его полностью без необходимости."
-        )
 
         rhyme_scheme_explanation = {
-            "AABB": "попарная (1-2 рифмуются, 3-4 рифмуются и т.д.)",
-            "ABAB": "перекрёстная (1-3 рифмуются, 2-4 рифмуются)",
-            "ABBA": "опоясывающая (1-4 рифмуются, 2-3 рифмуются)",
-            "AAAA": "сплошная (все строки рифмуются)",
+            "AABB": "попарная: строки 1-2 рифмуются между собой, 3-4 рифмуются между собой, и т.д.",
+            "ABAB": "перекрёстная: строки 1 и 3 рифмуются, строки 2 и 4 рифмуются",
+            "ABBA": "опоясывающая: строки 1 и 4 рифмуются, строки 2 и 3 рифмуются",
+            "AAAA": "сплошная: все строки рифмуются между собой",
         }.get(rhyme_scheme, rhyme_scheme)
 
+        first_line_constraint = (
+            f'Первая строка стихотворения должна быть точно: «{start_line}»'
+            if preserve_first_line and start_line
+            else ""
+        )
+
         prompt = f"""
-Ты литературный редактор русскоязычных стихотворений.
+Ты русскоязычный поэт. Тебе дан черновик, созданный алгоритмом — он может быть бессвязным или грамматически сломанным. Это нормально.
 
-Ниже дан черновик, созданный алгоритмом генерации текста.
-Твоя задача - отредактировать черновик, а не написать стихотворение с нуля.
+Напиши осмысленное, художественное стихотворение на русском языке, вдохновлённое этим черновиком.
 
-Требования:
-- Сохрани количество строк: ровно {expected_lines}.
-- ОБЯЗАТЕЛЬНО сохрани схему рифмовки {rhyme_scheme} ({rhyme_scheme_explanation}). Это приоритет номер один. Строки, которые должны рифмоваться, должны оканчиваться на схожие звуки.
-{first_line_rule}
-{draft_role_rule}
-- Сохрани тему и основные образы черновика, если они не ломают смысл.
-- Исправь грамматику и сделай текст более осмысленным.
-- Не добавляй заголовок, пояснения, нумерацию или комментарии.
-- Верни только итоговое стихотворение, строка за строкой.
+Жёсткие требования (нарушать нельзя):
+1. Ровно {expected_lines} строк.
+2. Схема рифмовки {rhyme_scheme}: {rhyme_scheme_explanation}. Проверь рифмы перед ответом.
+{f"3. {first_line_constraint}" if first_line_constraint else ""}
 
-Черновик:
+Свобода действий:
+- Можешь свободно переписать любые строки черновика или все строки целиком.
+- Можешь менять слова, образы, порядок мыслей — главное, чтобы получился живой, связный текст.
+- Черновик — только источник темы и настроения, не шаблон.
+
+Качество результата:
+- Текст должен быть грамматически правильным русским языком.
+- Строки должны читаться как стихи, а не как набор слов.
+- Рифмующиеся строки должны оканчиваться на одинаковые или близкие звуки (не просто похожие буквы).
+
+Не добавляй заголовок, нумерацию строк, пояснения или комментарии.
+Верни только готовое стихотворение.
+
+Черновик (для вдохновения):
 {draft_text}
 """.strip()
 
@@ -856,7 +950,7 @@ class LLMPoetryAssistant:
 
         if len(edited_lines) > expected_lines:
             edited_lines = edited_lines[:expected_lines]
-        elif len(edited_lines) < expected_lines and expansion_mode:
+        elif len(edited_lines) < expected_lines:
             edited_lines.extend(
                 self._complete_poem_lines(
                     current_lines=edited_lines,
@@ -993,17 +1087,100 @@ class LLMPoetryAssistant:
         poem_versions: Dict[str, Sequence[str] | str | None],
         start_line: str,
     ) -> List[Dict[str, Any]]:
-        """Evaluate multiple poems without exposing generator names to the LLM."""
+        """Evaluate all poem versions in a single API call."""
+
+        entries = [
+            (name, normalize_poem(poem))
+            for name, poem in poem_versions.items()
+            if normalize_poem(poem)
+        ]
+        if not entries:
+            return []
+
+        poems_block = "\n".join(
+            f"Стихотворение {i}:\n{chr(10).join(lines)}"
+            for i, (_, lines) in enumerate(entries, 1)
+        )
+        n = len(entries)
+
+        prompt = f"""
+Ты независимый эксперт по оценке русскоязычных стихотворений.
+Оцени каждое из {n} стихотворений по шкале от 1 до 5.
+1 - очень плохо, 2 - плохо, 3 - средне, 4 - хорошо, 5 - отлично.
+
+Используй всю шкалу 1-5. Оценивай каждый критерий независимо.
+Ставь 1 только если текст почти полностью распадается по критерию.
+
+Критерии:
+- semantic_coherence: смысловая связность;
+- grammar: грамматическая правильность;
+- theme_consistency: соответствие теме первой строки;
+- poetic_quality: художественность и выразительность;
+- overall: общее качество.
+
+Первая строка (тема для всех): "{start_line}"
+
+{poems_block}
+
+Верни JSON-массив из {n} объектов (по порядку стихотворений):
+[
+  {{"id": 1, "semantic_coherence": <число 1-5>, "grammar": <число 1-5>, "theme_consistency": <число 1-5>, "poetic_quality": <число 1-5>, "overall": <число 1-5>, "comment": "краткий комментарий"}},
+  ...
+]
+Только JSON, без markdown-разметки.
+""".strip()
+
+        raw = self._generate(
+            prompt,
+            temperature=self.config.evaluator_temperature,
+            response_mime_type="application/json",
+        )
+
+        parsed_list = self._parse_evaluation_batch(raw, n)
 
         rows = []
-        for name, poem in poem_versions.items():
-            evaluation = self.evaluate_poem(poem, start_line=start_line)
+        for i, (name, _) in enumerate(entries):
+            data = parsed_list[i] if i < len(parsed_list) else {}
             row = {"name": name}
             for field in SCORE_FIELDS:
-                row[field] = evaluation.get(field, 0)
-            row["comment"] = evaluation.get("comment", "")
+                row[field] = self._normalize_score(data.get(field))
+            row["comment"] = str(data.get("comment", "")).strip()
             rows.append(row)
         return rows
+
+    def _parse_evaluation_batch(
+        self, raw_response: str, expected: int
+    ) -> List[Dict[str, Any]]:
+        text = raw_response.strip()
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+        text = re.sub(r'"([^"]+)":\s*<[^>]+>', r'"\1": 0', text)
+
+        match = re.search(r"\[.*\]", text, flags=re.S)
+        if match:
+            text = match.group(0)
+
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+
+        # Fallback: extract individual objects
+        objects = re.findall(r"\{[^{}]+\}", text, flags=re.S)
+        result = []
+        for obj_text in objects:
+            try:
+                result.append(json.loads(obj_text))
+            except Exception:
+                obj = {}
+                for field in SCORE_FIELDS:
+                    m = re.search(rf'"{re.escape(field)}"\s*:\s*(\d+)', obj_text)
+                    if m:
+                        obj[field] = int(m.group(1))
+                result.append(obj)
+        return result[:expected] if result else [{}] * expected
 
     def _parse_evaluation(self, raw_response: str) -> Dict[str, Any]:
         text = raw_response.strip()
