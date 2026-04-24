@@ -38,6 +38,17 @@ try:
 except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
     httpx = None
 
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+except Exception:  # pragma: no cover - optional dependency in non-Colab runs.
+    Workbook = None
+    Alignment = None
+    Font = None
+    PatternFill = None
+    get_column_letter = None
+
 
 VOWELS = "аеёиоуыэюя"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -411,15 +422,7 @@ def write_csv_report(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    preferred_fields = list(preferred_fields or [])
-    keys = []
-    for row in rows:
-        for key in row.keys():
-            if key not in keys:
-                keys.append(key)
-
-    extra_fields = [key for key in keys if key not in preferred_fields]
-    fieldnames = preferred_fields + extra_fields
+    fieldnames = resolve_report_fieldnames(rows, preferred_fields=preferred_fields)
 
     with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -430,13 +433,114 @@ def write_csv_report(
     return str(path)
 
 
+def resolve_report_fieldnames(
+    rows: Sequence[Dict[str, Any]],
+    preferred_fields: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Build a stable ordered field list for report export."""
+
+    preferred_fields = list(preferred_fields or [])
+    keys = []
+    for row in rows:
+        for key in row.keys():
+            if key not in keys:
+                keys.append(key)
+
+    extra_fields = [key for key in keys if key not in preferred_fields]
+    return preferred_fields + extra_fields
+
+
+def _excel_cell_value(value: Any) -> Any:
+    """Convert Python values to something spreadsheet-friendly."""
+
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _column_width_for_field(fieldname: str, values: Sequence[Any]) -> float:
+    """Pick a practical Excel column width."""
+
+    lowered = fieldname.lower()
+    if lowered == "poem_text":
+        return 42
+    if lowered in {"llm_comment", "llm_raw_response"}:
+        return 36
+    if lowered.startswith("line_"):
+        return 28
+    if lowered.endswith("_path"):
+        return 32
+
+    sample_lengths = [len(str(value)) for value in values if value not in ("", None)]
+    header_len = len(fieldname)
+    if sample_lengths:
+        sample_lengths.sort()
+        percentile_index = int((len(sample_lengths) - 1) * 0.75)
+        typical_len = sample_lengths[percentile_index]
+        return max(12, min(24, max(header_len, typical_len + 2)))
+    return max(12, min(20, header_len + 2))
+
+
+def write_excel_report(
+    rows: Sequence[Dict[str, Any]],
+    output_path: str | Path,
+    preferred_fields: Optional[Sequence[str]] = None,
+    sheet_name: str = "Report",
+) -> Optional[str]:
+    """Write rows to a single-sheet Excel workbook and return the path."""
+
+    if Workbook is None or get_column_letter is None:
+        return None
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = resolve_report_fieldnames(rows, preferred_fields=preferred_fields)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = (sheet_name or "Report")[:31]
+
+    sheet.append(fieldnames)
+    for row in rows:
+        sheet.append([_excel_cell_value(row.get(field, "")) for field in fieldnames])
+
+    if Font is not None and PatternFill is not None and Alignment is not None:
+        header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+        header_font = Font(bold=True)
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        body_alignment = Alignment(vertical="top", wrap_text=True)
+
+        for cell in sheet[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = body_alignment
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+
+    for index, fieldname in enumerate(fieldnames, start=1):
+        values = [row.get(fieldname, "") for row in rows]
+        sheet.column_dimensions[get_column_letter(index)].width = _column_width_for_field(
+            fieldname, values
+        )
+
+    workbook.save(path)
+    return str(path)
+
+
 def export_report_bundle(
     rows: Sequence[Dict[str, Any]],
     output_dir: str | Path,
     prefix: str = "poetry_report",
     summary_group_fields: Sequence[str] = ("report_scope", "version", "stage"),
 ) -> Dict[str, Any]:
-    """Export detailed and summary CSV reports."""
+    """Export detailed and summary reports in user-friendly and fallback formats."""
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -474,19 +578,37 @@ def export_report_bundle(
     summary_rows = summarize_report_rows(
         detailed_rows, group_fields=summary_group_fields
     )
-    detailed_path = output_dir / f"{prefix}_detailed_{timestamp}.csv"
-    summary_path = output_dir / f"{prefix}_summary_{timestamp}.csv"
+    detailed_csv_path = output_dir / f"{prefix}_detailed_{timestamp}.csv"
+    summary_csv_path = output_dir / f"{prefix}_summary_{timestamp}.csv"
+    detailed_xlsx_path = output_dir / f"{prefix}_detailed_{timestamp}.xlsx"
+    summary_xlsx_path = output_dir / f"{prefix}_summary_{timestamp}.xlsx"
 
     write_csv_report(
         detailed_rows,
-        detailed_path,
+        detailed_csv_path,
         preferred_fields=preferred_detail_fields,
     )
-    write_csv_report(summary_rows, summary_path)
+    write_csv_report(summary_rows, summary_csv_path)
+
+    detailed_path = write_excel_report(
+        detailed_rows,
+        detailed_xlsx_path,
+        preferred_fields=preferred_detail_fields,
+        sheet_name="Detailed",
+    )
+    summary_path = write_excel_report(
+        summary_rows,
+        summary_xlsx_path,
+        sheet_name="Summary",
+    )
 
     return {
-        "detailed_path": str(detailed_path),
-        "summary_path": str(summary_path),
+        "detailed_path": detailed_path or str(detailed_csv_path),
+        "summary_path": summary_path or str(summary_csv_path),
+        "detailed_csv_path": str(detailed_csv_path),
+        "summary_csv_path": str(summary_csv_path),
+        "detailed_xlsx_path": str(detailed_xlsx_path) if detailed_path else "",
+        "summary_xlsx_path": str(summary_xlsx_path) if summary_path else "",
         "detailed_rows": detailed_rows,
         "summary_rows": summary_rows,
     }

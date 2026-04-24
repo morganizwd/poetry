@@ -742,7 +742,7 @@ def export_reports(
     lstm_demo_retries: int,
     lstm_batch_retries: int,
 ) -> Dict[str, Any]:
-    print_section("CSV-отчёты")
+    print_section("Отчёты")
     report_rows: List[Dict[str, Any]] = []
     demo_formal_map = {row["name"]: row for row in formal_rows}
     demo_eval_map = {row["name"]: row for row in llm_evaluation_rows}
@@ -820,8 +820,12 @@ def export_reports(
         output_dir=reports_dir,
         prefix=DEFAULT_REPORT_PREFIX,
     )
-    print(f"Detailed CSV: {report_bundle['detailed_path']}")
-    print(f"Summary CSV: {report_bundle['summary_path']}")
+    print(f"Detailed report: {report_bundle['detailed_path']}")
+    print(f"Summary report: {report_bundle['summary_path']}")
+    if report_bundle.get("detailed_csv_path") and report_bundle["detailed_csv_path"] != report_bundle["detailed_path"]:
+        print(f"Detailed CSV fallback: {report_bundle['detailed_csv_path']}")
+    if report_bundle.get("summary_csv_path") and report_bundle["summary_csv_path"] != report_bundle["summary_path"]:
+        print(f"Summary CSV fallback: {report_bundle['summary_csv_path']}")
     return report_bundle
 
 
@@ -1149,6 +1153,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print_section("Готово")
     print(f"Подробный отчёт: {report_bundle['detailed_path']}")
     print(f"Сводный отчёт: {report_bundle['summary_path']}")
+    if report_bundle.get("detailed_csv_path") and report_bundle["detailed_csv_path"] != report_bundle["detailed_path"]:
+        print(f"CSV-копия подробного отчёта: {report_bundle['detailed_csv_path']}")
+    if report_bundle.get("summary_csv_path") and report_bundle["summary_csv_path"] != report_bundle["summary_path"]:
+        print(f"CSV-копия сводного отчёта: {report_bundle['summary_csv_path']}")
     return 0
 
 

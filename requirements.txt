@@ -1,6 +1,7 @@
 # Core local runtime for the poetry project
 markovify
 tensorflow
+openpyxl
 
 # Optional cloud LLM helper used by llm_poetry_tools.py
 google-genai

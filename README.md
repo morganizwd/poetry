@@ -9,7 +9,7 @@
 
 - улучшать черновик после генерации;
 - сравнивать версию `raw` и версию `после LLM`;
-- сохранять подробные CSV-отчёты.
+- сохранять подробные отчёты в `Excel (.xlsx)` и резервные копии в `CSV`.
 
 Сейчас основной сценарий проекта: локальный запуск без Google Colab.
 
@@ -153,7 +153,7 @@ python poetry_local_pipeline.py --dataset-txt "D:\data\poems_clean.txt"
 После запуска полезны вот эти папки:
 
 - `data/poems_clean.txt` — подготовленный датасет;
-- `reports/` — подробные и краткие CSV-отчёты;
+- `reports/` — подробные и краткие отчёты в `Excel (.xlsx)` плюс резервные `CSV`;
 - `cache/poetry_lstm_cache` — кэш локальной LSTM;
 - `LSTM_generation_2/` — рабочие файлы LSTM;
 - `Markov_chain_2/` — рабочие файлы Markov.

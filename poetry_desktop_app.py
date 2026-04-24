@@ -17,6 +17,11 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Dict, List, Optional, Sequence
 
+try:
+    from openpyxl import load_workbook
+except Exception:
+    load_workbook = None
+
 from llm_poetry_tools import DEFAULT_OLLAMA_MODEL
 from poetry_local_pipeline import (
     DEFAULT_POEM_LINES,
@@ -136,7 +141,10 @@ def detect_preferred_python(project_dir: Path) -> Path:
 
 
 def open_path(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    if path.suffix:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path.mkdir(parents=True, exist_ok=True)
     if sys.platform.startswith("win"):
         os.startfile(str(path))
         return
@@ -237,11 +245,51 @@ def read_csv_rows(path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(csv_file))
 
 
+def read_excel_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.exists() or load_workbook is None:
+        return []
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    sheet = workbook.active
+    rows_iter = sheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        workbook.close()
+        return []
+
+    headers = [str(cell).strip() if cell is not None else "" for cell in header_row]
+    if not any(headers):
+        workbook.close()
+        return []
+
+    parsed_rows: List[Dict[str, str]] = []
+    for row in rows_iter:
+        parsed_rows.append(
+            {
+                headers[index]: "" if value is None else str(value)
+                for index, value in enumerate(row[: len(headers)])
+                if headers[index]
+            }
+        )
+    workbook.close()
+    return parsed_rows
+
+
+def read_report_rows(path: Path) -> List[Dict[str, str]]:
+    if path.suffix.lower() == ".xlsx":
+        return read_excel_rows(path)
+    return read_csv_rows(path)
+
+
 def latest_report_files(reports_dir: Path, suffix: str) -> List[Path]:
-    pattern = f"*{suffix}*.csv"
+    xlsx_candidates = (
+        list(reports_dir.glob(f"*{suffix}*.xlsx")) if load_workbook is not None else []
+    )
+    candidates = xlsx_candidates + list(reports_dir.glob(f"*{suffix}*.csv"))
     return sorted(
-        reports_dir.glob(pattern),
-        key=lambda item: item.stat().st_mtime,
+        candidates,
+        key=lambda item: (item.stat().st_mtime, item.suffix.lower() == ".xlsx"),
         reverse=True,
     )
 
@@ -403,7 +451,7 @@ class PipelineDesktopApp:
         self.detailed_report_var = tk.StringVar()
         self.summary_report_var = tk.StringVar()
         self.report_info_var = tk.StringVar(
-            value="После первого запуска здесь появятся подробные CSV-отчёты."
+            value="После первого запуска здесь появятся подробные отчёты Excel/CSV."
         )
 
     def _build_layout(self) -> None:
@@ -1848,8 +1896,8 @@ class PipelineDesktopApp:
         detailed_path = self._selected_detailed_path()
         summary_path = self._selected_summary_path()
 
-        self.detailed_rows = read_csv_rows(detailed_path) if detailed_path else []
-        self.summary_rows = read_csv_rows(summary_path) if summary_path else []
+        self.detailed_rows = read_report_rows(detailed_path) if detailed_path else []
+        self.summary_rows = read_report_rows(summary_path) if summary_path else []
 
         self.report_info_var.set(
             f"Подробный отчёт: {detailed_path if detailed_path else 'не выбран'} | "
@@ -1990,14 +2038,14 @@ class PipelineDesktopApp:
         if not path:
             messagebox.showinfo(APP_TITLE, "Подробный отчёт пока не выбран.")
             return
-        open_path(path.parent)
+        open_path(path)
 
     def _open_selected_summary(self) -> None:
         path = self._selected_summary_path()
         if not path:
             messagebox.showinfo(APP_TITLE, "Краткий отчёт пока не выбран.")
             return
-        open_path(path.parent)
+        open_path(path)
 
     def _save_selected_detailed_copy(self) -> None:
         self._save_report_copy(self._selected_detailed_path())
@@ -2009,11 +2057,16 @@ class PipelineDesktopApp:
         if not source_path:
             messagebox.showinfo(APP_TITLE, "Сначала выберите report.")
             return
+        suffix = source_path.suffix.lower() or ".xlsx"
+        if suffix == ".xlsx":
+            filetypes = [("Excel files", "*.xlsx"), ("CSV files", "*.csv"), ("All files", "*.*")]
+        else:
+            filetypes = [("CSV files", "*.csv"), ("Excel files", "*.xlsx"), ("All files", "*.*")]
         target = filedialog.asksaveasfilename(
             title="Сохранить копию отчёта",
             initialfile=source_path.name,
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            defaultextension=suffix,
+            filetypes=filetypes,
         )
         if not target:
             return
