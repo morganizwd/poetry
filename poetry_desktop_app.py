@@ -495,232 +495,6 @@ class PipelineDesktopApp:
         self._build_compare_tab(compare_tab)
         self._build_reports_tab(reports_tab)
 
-    def _build_run_tab(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(1, weight=1)
-        parent.rowconfigure(0, weight=1)
-
-        controls = ttk.Frame(parent)
-        controls.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
-        controls.columnconfigure(0, weight=1)
-
-        log_frame = ttk.Frame(parent)
-        log_frame.grid(row=0, column=1, sticky="nsew")
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(1, weight=1)
-
-        row = 0
-
-        run_box = ttk.LabelFrame(controls, text="Запуск", padding=10)
-        run_box.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        run_box.columnconfigure(0, weight=1)
-        run_box.columnconfigure(1, weight=1)
-        run_box.columnconfigure(2, weight=1)
-
-        ttk.Button(run_box, text="Быстрый запуск", command=self._run_fast_mode).grid(
-            row=0, column=0, sticky="ew", padx=(0, 6)
-        )
-        ttk.Button(run_box, text="Полный запуск", command=self._run_full_mode).grid(
-            row=0, column=1, sticky="ew", padx=(0, 6)
-        )
-        ttk.Button(run_box, text="Только данные", command=self._run_prepare_only).grid(
-            row=0, column=2, sticky="ew"
-        )
-
-        ttk.Button(run_box, text="Остановить", command=self._stop_process).grid(
-            row=1, column=0, sticky="ew", padx=(0, 6), pady=(8, 0)
-        )
-        ttk.Button(run_box, text="Очистить лог", command=self._clear_log).grid(
-            row=1, column=1, sticky="ew", padx=(0, 6), pady=(8, 0)
-        )
-        ttk.Button(
-            run_box,
-            text="Скопировать команду",
-            command=self._copy_command_preview,
-        ).grid(row=1, column=2, sticky="ew", pady=(8, 0))
-        ttk.Button(
-            run_box,
-            text="Удалить веса LSTM",
-            command=self._delete_lstm_weights,
-        ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-
-        row += 1
-
-        llm_box = ttk.LabelFrame(controls, text="LLM / Ollama", padding=10)
-        llm_box.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        llm_box.columnconfigure(1, weight=1)
-
-        ttk.Label(llm_box, text="Провайдер").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        ttk.Combobox(
-            llm_box,
-            textvariable=self.llm_provider_var,
-            values=["ollama", "disabled"],
-            state="readonly",
-        ).grid(row=0, column=1, sticky="ew", pady=(0, 6))
-
-        ttk.Label(llm_box, text="Ollama model").grid(row=1, column=0, sticky="w", pady=6)
-        llm_model_entry = ttk.Entry(llm_box, textvariable=self.llm_model_name_var)
-        llm_model_entry.grid(row=1, column=1, sticky="ew", pady=6)
-        install_entry_shortcuts(llm_model_entry)
-
-        ttk.Label(llm_box, text="Ollama URL").grid(row=2, column=0, sticky="w", pady=6)
-        ollama_url_entry = ttk.Entry(llm_box, textvariable=self.ollama_base_url_var)
-        ollama_url_entry.grid(row=2, column=1, sticky="ew", pady=6)
-        install_entry_shortcuts(ollama_url_entry)
-
-        ttk.Button(llm_box, text="Проверить Ollama", command=self._check_ollama_async).grid(
-            row=3, column=0, sticky="ew", pady=(8, 0), padx=(0, 6)
-        )
-        ttk.Button(
-            llm_box,
-            text="URL по умолчанию",
-            command=lambda: self.ollama_base_url_var.set(DEFAULT_OLLAMA_BASE_URL),
-        ).grid(row=3, column=1, sticky="w", pady=(8, 0))
-
-        ttk.Label(
-            llm_box,
-            textvariable=self.llm_status_var,
-            wraplength=360,
-            justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-        row += 1
-
-        hardware_box = ttk.LabelFrame(controls, text="GPU / железо", padding=10)
-        hardware_box.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        hardware_box.columnconfigure(0, weight=1)
-
-        ttk.Button(
-            hardware_box,
-            text="Обновить статус GPU",
-            command=self._refresh_hardware_async,
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(
-            hardware_box,
-            textvariable=self.nvidia_status_var,
-            wraplength=360,
-            justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Label(
-            hardware_box,
-            textvariable=self.tensorflow_gpu_status_var,
-            wraplength=360,
-            justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Label(
-            hardware_box,
-            text=(
-                "Важно: на native Windows TensorFlow 2.11+ локально не использует GPU. "
-                "Для LSTM это ограничение остаётся, но локальная Ollama работает отдельно "
-                "от TensorFlow и может использовать свой runtime."
-            ),
-            wraplength=360,
-            justify="left",
-        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
-
-        row += 1
-
-        main_box = ttk.LabelFrame(controls, text="Основные настройки", padding=10)
-        main_box.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        main_box.columnconfigure(1, weight=1)
-
-        ttk.Label(main_box, text="Стартовая строка").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        start_line_entry = ttk.Entry(main_box, textvariable=self.start_line_var)
-        start_line_entry.grid(row=0, column=1, sticky="ew", pady=(0, 6))
-        install_entry_shortcuts(start_line_entry)
-
-        ttk.Label(main_box, text="Схема рифмы").grid(row=1, column=0, sticky="w", pady=6)
-        ttk.Combobox(
-            main_box,
-            textvariable=self.rhyme_scheme_var,
-            values=["AABB", "ABAB", "ABBA", "AAAA"],
-            state="readonly",
-        ).grid(row=1, column=1, sticky="ew", pady=6)
-
-        ttk.Label(main_box, text="Количество строк").grid(row=2, column=0, sticky="w", pady=6)
-        ttk.Spinbox(
-            main_box,
-            from_=2,
-            to=16,
-            textvariable=self.poem_lines_var,
-            width=8,
-        ).grid(row=2, column=1, sticky="w", pady=6)
-
-        ttk.Label(main_box, text="Ваш poems_clean.txt").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        dataset_row = ttk.Frame(main_box)
-        dataset_row.grid(row=3, column=1, sticky="ew", pady=(6, 0))
-        dataset_row.columnconfigure(0, weight=1)
-        dataset_entry = ttk.Entry(dataset_row, textvariable=self.dataset_txt_var)
-        dataset_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        install_entry_shortcuts(dataset_entry)
-        ttk.Button(dataset_row, text="Выбрать", command=self._pick_dataset).grid(
-            row=0, column=1, sticky="ew"
-        )
-
-        row += 1
-
-        train_box = ttk.LabelFrame(controls, text="Обучение и эксперимент", padding=10)
-        train_box.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        train_box.columnconfigure(1, weight=1)
-        self._add_spinbox_row(train_box, 0, "Quick LSTM epochs", self.quick_epochs_var, 1, 10)
-        self._add_spinbox_row(train_box, 1, "Full LSTM epochs", self.full_epochs_var, 1, 100)
-        self._add_spinbox_row(train_box, 2, "Batch runs", self.experiment_runs_var, 1, 100)
-        self._add_spinbox_row(
-            train_box,
-            3,
-            "Batch LLM runs",
-            self.experiment_llm_runs_var,
-            1,
-            100,
-        )
-
-        row += 1
-
-        flags_box = ttk.LabelFrame(controls, text="Флаги запуска", padding=10)
-        flags_box.grid(row=row, column=0, sticky="ew")
-        flags_box.columnconfigure(0, weight=1)
-        flags_box.columnconfigure(1, weight=1)
-
-        flag_widgets = [
-            ("Fast mode", self.fast_mode_var, 0, 0),
-            ("Prepare data only", self.prepare_data_only_var, 0, 1),
-            ("Enable LLM evaluation", self.enable_llm_evaluation_var, 1, 0),
-            ("Skip LLM editing", self.skip_llm_editing_var, 1, 1),
-            ("Skip quick LSTM", self.skip_quick_lstm_var, 2, 0),
-            ("Skip full LSTM", self.skip_full_lstm_var, 2, 1),
-            ("Skip batch", self.skip_batch_var, 3, 0),
-            ("Disable LSTM cache", self.no_lstm_cache_var, 3, 1),
-            ("Force dataset refresh", self.force_dataset_refresh_var, 4, 0),
-        ]
-        for text, variable, row_index, col_index in flag_widgets:
-            ttk.Checkbutton(flags_box, text=text, variable=variable).grid(
-                row=row_index,
-                column=col_index,
-                sticky="w",
-                pady=2,
-                padx=(0, 12),
-            )
-
-        ttk.Label(
-            log_frame,
-            text="Лог выполнения пайплайна",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-
-        self.log_widget = ScrolledText(
-            log_frame,
-            wrap=tk.WORD,
-            font=("Consolas", 10),
-            state="disabled",
-        )
-        self.log_widget.grid(row=1, column=0, sticky="nsew")
-
-        ttk.Label(
-            log_frame,
-            textvariable=self.status_var,
-            wraplength=820,
-            justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
-
     def _build_run_tab_friendly(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -1969,7 +1743,7 @@ class PipelineDesktopApp:
 
         self.compare_pairs = []
         self.compare_tree.delete(*self.compare_tree.get_children())
-        for index, (key, versions) in enumerate(grouped.items()):
+        for key, versions in grouped.items():
             raw_row = versions.get("raw")
             llm_row = versions.get("llm")
             if not raw_row or not llm_row:
@@ -1979,11 +1753,14 @@ class PipelineDesktopApp:
                 "raw": raw_row,
                 "llm": llm_row,
             }
+            # iid должен соответствовать индексу в compare_pairs, иначе при
+            # пропуске неполных пар выбор строки попадает не в ту запись.
+            pair_index = len(self.compare_pairs)
             self.compare_pairs.append(pair)
             self.compare_tree.insert(
                 "",
                 "end",
-                iid=f"cmp-{index}",
+                iid=f"cmp-{pair_index}",
                 values=(key[0], key[1], key[2]),
             )
 
