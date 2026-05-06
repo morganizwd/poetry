@@ -1105,11 +1105,57 @@ class PipelineDesktopApp:
             justify="left",
         ).grid(row=2, column=0, sticky="nw", pady=(0, 8))
 
-        summary_frame = ttk.Frame(parent)
-        summary_frame.grid(row=3, column=0, sticky="nsew")
-        summary_frame.columnconfigure(0, weight=1)
-        summary_frame.rowconfigure(0, weight=1)
+        tables_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
+        tables_pane.grid(row=3, column=0, sticky="nsew")
         parent.rowconfigure(3, weight=1)
+
+        detailed_box = ttk.LabelFrame(tables_pane, text="Подробный отчёт", padding=4)
+        detailed_box.columnconfigure(0, weight=1)
+        detailed_box.rowconfigure(0, weight=1)
+        tables_pane.add(detailed_box, weight=3)
+
+        detailed_columns = (
+            "report_scope",
+            "run",
+            "source_model",
+            "version",
+            "stage",
+            "actual_lines",
+            "rhyme_quality",
+            "overall",
+        )
+        self.detailed_tree_reports_tab = ttk.Treeview(
+            detailed_box,
+            columns=detailed_columns,
+            show="headings",
+            height=12,
+        )
+        for column, heading, width in [
+            ("report_scope", "scope", 90),
+            ("run", "run", 60),
+            ("source_model", "source", 100),
+            ("version", "version", 180),
+            ("stage", "stage", 110),
+            ("actual_lines", "lines", 70),
+            ("rhyme_quality", "rhyme", 70),
+            ("overall", "overall", 70),
+        ]:
+            self.detailed_tree_reports_tab.heading(column, text=heading)
+            self.detailed_tree_reports_tab.column(column, width=width, anchor="w")
+        self.detailed_tree_reports_tab.grid(row=0, column=0, sticky="nsew")
+
+        detailed_scroll = ttk.Scrollbar(
+            detailed_box,
+            orient="vertical",
+            command=self.detailed_tree_reports_tab.yview,
+        )
+        detailed_scroll.grid(row=0, column=1, sticky="ns")
+        self.detailed_tree_reports_tab.configure(yscrollcommand=detailed_scroll.set)
+
+        summary_box = ttk.LabelFrame(tables_pane, text="Краткий отчёт", padding=4)
+        summary_box.columnconfigure(0, weight=1)
+        summary_box.rowconfigure(0, weight=1)
+        tables_pane.add(summary_box, weight=2)
 
         columns = (
             "report_scope",
@@ -1121,10 +1167,10 @@ class PipelineDesktopApp:
             "mean_overall",
         )
         self.summary_tree = ttk.Treeview(
-            summary_frame,
+            summary_box,
             columns=columns,
             show="headings",
-            height=18,
+            height=10,
         )
         for column, heading, width in [
             ("report_scope", "scope", 90),
@@ -1139,7 +1185,7 @@ class PipelineDesktopApp:
             self.summary_tree.column(column, width=width, anchor="w")
         self.summary_tree.grid(row=0, column=0, sticky="nsew")
 
-        summary_scroll = ttk.Scrollbar(summary_frame, orient="vertical", command=self.summary_tree.yview)
+        summary_scroll = ttk.Scrollbar(summary_box, orient="vertical", command=self.summary_tree.yview)
         summary_scroll.grid(row=0, column=1, sticky="ns")
         self.summary_tree.configure(yscrollcommand=summary_scroll.set)
 
@@ -1680,8 +1726,21 @@ class PipelineDesktopApp:
         )
 
         self._populate_poems_tree()
+        self._populate_detailed_tree_reports_tab()
         self._populate_summary_tree()
         self._build_compare_pairs()
+
+    def _detailed_row_values(self, row: Dict[str, str]) -> tuple:
+        return (
+            row.get("report_scope", ""),
+            row.get("run", ""),
+            row.get("source_model", ""),
+            row.get("version", ""),
+            row.get("stage", ""),
+            row.get("actual_lines", row.get("lines", "")),
+            row.get("rhyme_quality", ""),
+            row.get("overall", ""),
+        )
 
     def _populate_poems_tree(self) -> None:
         self.poems_tree.delete(*self.poems_tree.get_children())
@@ -1690,20 +1749,22 @@ class PipelineDesktopApp:
                 "",
                 "end",
                 iid=f"poem-{index}",
-                values=(
-                    row.get("report_scope", ""),
-                    row.get("run", ""),
-                    row.get("source_model", ""),
-                    row.get("version", ""),
-                    row.get("stage", ""),
-                    row.get("actual_lines", row.get("lines", "")),
-                    row.get("rhyme_quality", ""),
-                    row.get("overall", ""),
-                ),
+                values=self._detailed_row_values(row),
             )
 
         self.poem_details_label.config(text="Выберите стих из списка.")
         self._set_text_widget(self.poem_text_widget, "")
+
+    def _populate_detailed_tree_reports_tab(self) -> None:
+        tree = self.detailed_tree_reports_tab
+        tree.delete(*tree.get_children())
+        for index, row in enumerate(self.detailed_rows):
+            tree.insert(
+                "",
+                "end",
+                iid=f"rdetail-{index}",
+                values=self._detailed_row_values(row),
+            )
 
     def _populate_summary_tree(self) -> None:
         self.summary_tree.delete(*self.summary_tree.get_children())
